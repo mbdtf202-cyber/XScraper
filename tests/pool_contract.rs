@@ -1,5 +1,7 @@
 use chrono::Utc;
+use std::collections::BTreeMap;
 use tempfile::{TempDir, tempdir};
+use xscraper::Account;
 use xscraper::pool::{AccountsPool, AddAccount};
 
 fn pool() -> (TempDir, AccountsPool) {
@@ -105,4 +107,23 @@ fn stats_and_delete_report_pool_state() {
     pool.set_active("user1", false).unwrap();
     assert_eq!(pool.delete_inactive().unwrap(), 1);
     assert!(pool.get_all().unwrap().is_empty());
+}
+
+#[test]
+fn invalid_header_material_returns_error_instead_of_panicking() {
+    let mut cookies = BTreeMap::new();
+    cookies.insert("ct0".into(), "bad\r\ncsrf".into());
+
+    let account = Account::new(
+        "user1",
+        "pass1",
+        "email@example.com",
+        "email_pass",
+        Some("bad\r\nagent".into()),
+        None,
+        cookies,
+        None,
+    );
+
+    assert!(account.http_headers().is_err());
 }

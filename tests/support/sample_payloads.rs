@@ -67,6 +67,53 @@ pub fn search_payload() -> Value {
     })
 }
 
+pub fn current_search_payload() -> Value {
+    json!({
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [{
+                            "entries": [{
+                                "entryId": "tweet-3001",
+                                "content": {
+                                    "itemContent": {
+                                        "tweet_results": {
+                                            "result": {
+                                                "__typename": "Tweet",
+                                                "rest_id": "3001",
+                                                "legacy": {
+                                                    "created_at": "Sun May 17 20:47:51 +0000 2026",
+                                                    "user_id_str": "4001",
+                                                    "full_text": "Current X payload",
+                                                    "lang": "en",
+                                                    "reply_count": 0,
+                                                    "retweet_count": 0,
+                                                    "favorite_count": 1,
+                                                    "quote_count": 0,
+                                                    "bookmark_count": 0,
+                                                    "conversation_id_str": "3001",
+                                                    "entities": {"hashtags": [], "symbols": [], "user_mentions": []}
+                                                },
+                                                "core": {
+                                                    "user_results": {
+                                                        "result": current_user_result("4001", "current_user", "Current User")
+                                                    }
+                                                },
+                                                "views": {"count": "12"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }]
+                    }
+                }
+            }
+        }
+    })
+}
+
 pub fn trend_payload() -> Value {
     json!({
         "data": {
@@ -149,6 +196,39 @@ fn user_result(id: &str, username: &str, displayname: &str) -> Value {
             },
             "pinned_tweet_ids_str": ["2001"]
         }
+    })
+}
+
+fn current_user_result(id: &str, username: &str, displayname: &str) -> Value {
+    json!({
+        "__typename": "User",
+        "id": format!("VXNlcjo{id}"),
+        "rest_id": id,
+        "core": {
+            "screen_name": username,
+            "name": displayname,
+            "created_at": "Thu Dec 20 21:22:10 +0000 2012"
+        },
+        "legacy": {
+            "description": "Current profile",
+            "followers_count": 42,
+            "friends_count": 7,
+            "statuses_count": 11,
+            "favourites_count": 13,
+            "listed_count": 2,
+            "media_count": 3,
+            "profile_banner_url": "https://example.com/current-banner.jpg",
+            "entities": {
+                "description": {"urls": []}
+            },
+            "pinned_tweet_ids_str": []
+        },
+        "avatar": {"image_url": "https://example.com/current-avatar.jpg"},
+        "privacy": {"protected": false},
+        "verification": {"verified": false},
+        "profile_bio": {"description": "Current profile"},
+        "location": {"location": "Current City"},
+        "is_blue_verified": true
     })
 }
 

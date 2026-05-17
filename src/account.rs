@@ -68,24 +68,25 @@ impl Account {
         let mut headers = HeaderMap::new();
 
         for (key, value) in &self.headers {
-            if let (Ok(name), Ok(value)) =
-                (HeaderName::from_bytes(key.as_bytes()), HeaderValue::from_str(value))
-            {
-                headers.insert(name, value);
-            }
+            let name = HeaderName::from_bytes(key.as_bytes())?;
+            let value = HeaderValue::from_str(value)?;
+            headers.insert(name, value);
         }
 
-        headers.insert("user-agent", HeaderValue::from_str(&self.user_agent).unwrap());
+        headers.insert("user-agent", HeaderValue::from_str(&self.user_agent)?);
         headers.insert("content-type", HeaderValue::from_static("application/json"));
         headers.insert("authorization", HeaderValue::from_static(BEARER_TOKEN));
         headers.insert("x-twitter-active-user", HeaderValue::from_static("yes"));
         headers.insert("x-twitter-client-language", HeaderValue::from_static("en"));
+        if self.cookies.contains_key("auth_token") {
+            headers.insert("x-twitter-auth-type", HeaderValue::from_static("OAuth2Session"));
+        }
 
         if !self.cookies.is_empty() {
-            headers.insert("cookie", HeaderValue::from_str(&self.cookie_header()).unwrap());
+            headers.insert("cookie", HeaderValue::from_str(&self.cookie_header())?);
         }
         if let Some(ct0) = self.cookies.get("ct0") {
-            headers.insert("x-csrf-token", HeaderValue::from_str(ct0).unwrap());
+            headers.insert("x-csrf-token", HeaderValue::from_str(ct0)?);
         }
 
         Ok(headers)
@@ -130,5 +131,5 @@ impl Account {
 }
 
 pub fn default_user_agent() -> String {
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15".to_string()
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36".to_string()
 }

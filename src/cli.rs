@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
@@ -463,8 +464,46 @@ fn doctor_security() -> Result<()> {
         }
     }
 
+    let insecure_runtime_files = insecure_runtime_files()?;
+    if !insecure_runtime_files.is_empty() {
+        return Err(crate::error::XScraperError::Config(format!(
+            "{} is readable by group/others; prefer chmod 600",
+            insecure_runtime_files.join(", ")
+        )));
+    }
+
     println!("security: ok sensitive runtime files are ignored and untracked");
     Ok(())
+}
+
+#[cfg(unix)]
+fn insecure_runtime_files() -> Result<Vec<String>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(".").map_err(|source| crate::error::XScraperError::io(".", source))? {
+        let entry = entry.map_err(|source| crate::error::XScraperError::io(".", source))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("accounts.db") {
+            continue;
+        }
+
+        let mode = entry
+            .metadata()
+            .map_err(|source| crate::error::XScraperError::io(entry.path(), source))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            files.push(name);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+#[cfg(not(unix))]
+fn insecure_runtime_files() -> Result<Vec<String>> {
+    Ok(Vec::new())
 }
 
 fn git_ls_files() -> Option<Vec<String>> {

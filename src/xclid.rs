@@ -125,18 +125,64 @@ fn parse_migrate_inputs(text: &str) -> BTreeMap<String, String> {
 }
 
 fn get_scripts_list(text: &str) -> Result<Vec<String>> {
-    let scripts = text
-        .split("e=>e+\".\"+")
-        .nth(1)
-        .and_then(|part| part.split("[e]+\"a.js\"").next())
-        .ok_or_else(|| XScraperError::LoginFlow("xclid scripts marker missing".into()))?;
-    let values: BTreeMap<String, String> = serde_json::from_str(scripts)?;
-    Ok(values
+    let names = parse_chunk_map_after(text, "_.u=e=>\"\"+")?;
+    let hashes = parse_chunk_map_before(text, ")[e]+\"a.js\"")?;
+    let scripts = hashes
         .into_iter()
-        .map(|(key, value)| {
-            format!("https://abs.twimg.com/responsive-web/client-web/{key}.{value}a.js")
+        .map(|(key, hash)| {
+            let name = names.get(&key).cloned().unwrap_or(key);
+            format!("https://abs.twimg.com/responsive-web/client-web/{name}.{hash}a.js")
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if scripts.is_empty() {
+        return Err(XScraperError::LoginFlow("xclid scripts marker missing".into()));
+    }
+    Ok(scripts)
+}
+
+fn parse_chunk_map_after(text: &str, start_marker: &str) -> Result<BTreeMap<String, String>> {
+    let marker = text
+        .find(start_marker)
+        .ok_or_else(|| XScraperError::LoginFlow("xclid scripts marker missing".into()))?;
+    let start = text[marker..]
+        .find("({")
+        .ok_or_else(|| XScraperError::LoginFlow("xclid scripts marker missing".into()))?
+        + marker
+        + 1;
+    let end = text[start..]
+        .find("})[e]")
+        .ok_or_else(|| XScraperError::LoginFlow("xclid scripts marker missing".into()))?
+        + start
+        + 1;
+    parse_quoted_numeric_map(&text[start..end])
+}
+
+fn parse_chunk_map_before(text: &str, end_marker: &str) -> Result<BTreeMap<String, String>> {
+    let end = text
+        .find(end_marker)
+        .ok_or_else(|| XScraperError::LoginFlow("xclid scripts marker missing".into()))?;
+    let start = text[..end]
+        .rfind("({")
+        .ok_or_else(|| XScraperError::LoginFlow("xclid scripts marker missing".into()))?
+        + 1;
+    parse_quoted_numeric_map(&text[start..end])
+}
+
+fn parse_quoted_numeric_map(raw: &str) -> Result<BTreeMap<String, String>> {
+    let quoted = Regex::new(r#"(\d+):"([^"]+)""#)
+        .map_err(|error| XScraperError::LoginFlow(error.to_string()))?;
+    let values = quoted
+        .captures_iter(raw)
+        .filter_map(|captures| {
+            let key = captures.get(1)?.as_str().to_string();
+            let value = captures.get(2)?.as_str().to_string();
+            Some((key, value))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if values.is_empty() {
+        return Err(XScraperError::LoginFlow("xclid scripts marker missing".into()));
+    }
+    Ok(values)
 }
 
 async fn parse_anim_idx(client: &reqwest::Client, text: &str) -> Result<Vec<usize>> {
@@ -349,7 +395,7 @@ impl RoundTo for f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::XClientTransactionIdGenerator;
+    use super::{XClientTransactionIdGenerator, get_scripts_list};
 
     #[test]
     fn calc_returns_base64_like_transaction_id() {
@@ -357,5 +403,22 @@ mod tests {
         let id = generator.calc("GET", "/i/api/graphql/test");
         assert!(id.len() > 20);
         assert!(!id.contains('='));
+    }
+
+    #[test]
+    fn scripts_list_uses_current_webpack_chunk_names() {
+        let html = r#"_.u=e=>""+(({59924:"ondemand.s",61093:"bundle.UserAbout"})[e]||e)+"."+({59924:"f7a413c",61093:"39d4cf7"})[e]+"a.js""#;
+
+        let scripts = get_scripts_list(html).unwrap();
+
+        assert!(scripts.contains(
+            &"https://abs.twimg.com/responsive-web/client-web/ondemand.s.f7a413ca.js".to_string()
+        ));
+        assert!(
+            scripts.contains(
+                &"https://abs.twimg.com/responsive-web/client-web/bundle.UserAbout.39d4cf7a.js"
+                    .to_string()
+            )
+        );
     }
 }

@@ -54,7 +54,9 @@ impl Api {
                 "rawQuery": query,
                 "count": 20,
                 "product": "Latest",
-                "querySource": "typed_query"
+                "querySource": "typed_query",
+                "withGrokTranslatedBio": false,
+                "withQuickPromoteEligibilityTweetFields": false
             }),
             kv,
         );
@@ -578,11 +580,17 @@ impl Api {
         let queue = op_name(op);
         let client = self.queue_client(queue);
         let mut session = client.open().await?;
-        let params = gql_params(op, variables, features, None);
-        let url = format!("{GQL_URL}/{op}");
-        let response = session.get(&url, params).await?.map(|response| response.value);
-        session.close().await?;
-        Ok(response)
+        let body = gql_body(variables, features, None);
+        let result = session
+            .post_json(&gql_path(op), body)
+            .await
+            .map(|response| response.map(|response| response.value));
+        let close_result = session.close().await;
+        match (result, close_result) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     async fn gql_items(
@@ -596,39 +604,47 @@ impl Api {
         let queue = op_name(op);
         let client = self.queue_client(queue);
         let mut session = client.open().await?;
-        let mut cursor: Option<String> = None;
-        let mut total = 0usize;
-        let mut pages = Vec::new();
+        let result: Result<Vec<Value>> = async {
+            let mut cursor: Option<String> = None;
+            let mut total = 0usize;
+            let mut pages = Vec::new();
 
-        loop {
-            if let Some(cursor) = cursor.as_ref() {
-                variables["cursor"] = Value::String(cursor.clone());
+            loop {
+                if let Some(cursor) = cursor.as_ref() {
+                    variables["cursor"] = Value::String(cursor.clone());
+                }
+
+                let body = gql_body(variables.clone(), features.clone(), field_toggles(queue));
+                let Some(response) = session.post_json(&gql_path(op), body).await? else {
+                    break;
+                };
+
+                let entries = response
+                    .value
+                    .pointer("/data")
+                    .and_then(|_| count_entries(&response.value))
+                    .unwrap_or_default();
+                cursor = find_cursor(&response.value, cursor_type);
+                total += entries;
+
+                let has_items = entries > 0;
+                pages.push(response.value);
+
+                if !has_items || cursor.is_none() || (limit >= 0 && total >= limit as usize) {
+                    break;
+                }
             }
 
-            let params = gql_params(op, variables.clone(), features.clone(), field_toggles(queue));
-            let url = format!("{GQL_URL}/{op}");
-            let Some(response) = session.get(&url, params).await? else {
-                break;
-            };
-
-            let entries = response
-                .value
-                .pointer("/data")
-                .and_then(|_| count_entries(&response.value))
-                .unwrap_or_default();
-            cursor = find_cursor(&response.value, cursor_type);
-            total += entries;
-
-            let has_items = entries > 0;
-            pages.push(response.value);
-
-            if !has_items || cursor.is_none() || (limit >= 0 && total >= limit as usize) {
-                break;
-            }
+            Ok(pages)
         }
+        .await;
 
-        session.close().await?;
-        Ok(pages)
+        let close_result = session.close().await;
+        match (result, close_result) {
+            (Ok(pages), Ok(())) => Ok(pages),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     fn queue_client(&self, queue: &str) -> QueueClient {
@@ -638,39 +654,40 @@ impl Api {
     }
 }
 
-fn gql_params(
-    op: &str,
-    variables: Value,
-    features: Option<Value>,
-    field_toggles: Option<Value>,
-) -> Vec<(String, String)> {
-    let mut params = vec![
-        ("variables".into(), compact_json(&variables)),
-        ("features".into(), compact_json(&merge_json(default_features(), features))),
-    ];
+fn gql_body(variables: Value, features: Option<Value>, field_toggles: Option<Value>) -> Value {
+    let mut body = json!({
+        "variables": variables,
+        "features": merge_json(default_features(), features),
+    });
     if let Some(field_toggles) = field_toggles {
-        params.push(("fieldToggles".into(), compact_json(&field_toggles)));
-    } else if matches!(op_name(op), "SearchTimeline" | "ListLatestTweetsTimeline") {
-        params.push((
-            "fieldToggles".into(),
-            compact_json(&json!({ "withArticleRichContentState": false })),
-        ));
+        body["fieldToggles"] = field_toggles;
     }
-    params
+    body
+}
+
+fn gql_path(op: &str) -> String {
+    format!("/i/api/graphql/{op}")
 }
 
 fn field_toggles(queue: &str) -> Option<Value> {
     match queue {
-        "SearchTimeline" | "ListLatestTweetsTimeline" => {
-            Some(json!({ "withArticleRichContentState": false }))
-        }
+        "SearchTimeline" | "ListLatestTweetsTimeline" => Some(default_field_toggles()),
         "UserMedia" => Some(json!({ "withArticlePlainText": false })),
         _ => None,
     }
 }
 
-fn compact_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
+fn default_field_toggles() -> Value {
+    json!({
+        "withPayments": false,
+        "withAuxiliaryUserLabels": false,
+        "withArticleRichContentState": false,
+        "withArticlePlainText": false,
+        "withArticleSummaryText": false,
+        "withArticleVoiceOver": false,
+        "withGrokAnalyze": false,
+        "withDisallowedReplyControls": false
+    })
 }
 
 fn find_cursor(value: &Value, cursor_type: &str) -> Option<String> {
@@ -737,7 +754,9 @@ fn operation_request(
                     "rawQuery": id_or_query,
                     "count": 20,
                     "product": "Latest",
-                    "querySource": "typed_query"
+                    "querySource": "typed_query",
+                    "withGrokTranslatedBio": false,
+                    "withQuickPromoteEligibilityTweetFields": false
                 }),
                 kv,
             ),

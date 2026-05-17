@@ -109,7 +109,6 @@ fn to_old_response(value: &Value) -> OldResponse {
     collect_typed_objects(value, "User", &mut user_objects);
     for object in user_objects {
         if object.contains_key("legacy")
-            && object.contains_key("id")
             && let Some((id, old)) = to_old_object(object)
         {
             response.users.insert(id, old);
@@ -134,12 +133,32 @@ fn to_old_object(object: &Map<String, Value>) -> Option<(String, Value)> {
     for (key, value) in legacy {
         merged.insert(key.clone(), value.clone());
     }
+    overlay_current_user_fields(object, &mut merged);
     merged.insert("id_str".into(), Value::String(rest_id.clone()));
     if let Ok(id) = rest_id.parse::<u64>() {
         merged.insert("id".into(), json!(id));
     }
     merged.insert("legacy".into(), Value::Null);
     Some((rest_id, Value::Object(merged)))
+}
+
+fn overlay_current_user_fields(source: &Map<String, Value>, merged: &mut Map<String, Value>) {
+    for (source_path, target_key) in [
+        ("core.screen_name", "screen_name"),
+        ("core.name", "name"),
+        ("core.created_at", "created_at"),
+        ("avatar.image_url", "profile_image_url_https"),
+        ("profile_bio.description", "description"),
+        ("location.location", "location"),
+        ("privacy.protected", "protected"),
+        ("verification.verified", "verified"),
+    ] {
+        if !merged.contains_key(target_key)
+            && let Some(value) = value_path(&Value::Object(source.clone()), source_path)
+        {
+            merged.insert(target_key.into(), value.clone());
+        }
+    }
 }
 
 fn parse_user_from_old(value: &Value) -> Result<User> {

@@ -3,7 +3,7 @@ use crate::error::{Result, XScraperError};
 use crate::pool::AccountsPool;
 use crate::xclid::XClientTransactionIdGenerator;
 use chrono::Utc;
-use reqwest::{Client, Proxy, StatusCode};
+use reqwest::{Client, Method, Proxy, StatusCode};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -61,8 +61,23 @@ impl QueueClient {
     ) -> Result<Option<QueueResponse>> {
         let mut session = self.open().await?;
         let response = session.get(url, params).await;
-        session.close().await?;
-        response
+        let close_result = session.close().await;
+        match (response, close_result) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    pub async fn post_json(&self, url: &str, body: Value) -> Result<Option<QueueResponse>> {
+        let mut session = self.open().await?;
+        let response = session.post_json(url, body).await;
+        let close_result = session.close().await;
+        match (response, close_result) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     pub async fn open(&self) -> Result<QueueSession> {
@@ -92,16 +107,19 @@ impl QueueClient {
     async fn request_with_context(
         &self,
         ctx: &mut RequestContext,
-        url: &str,
-        params: &[(String, String)],
+        request: QueueRequest<'_>,
     ) -> std::result::Result<QueueResponse, RequestDecision> {
-        let url = self.normalize_url(url)?;
-        let transaction_id =
-            self.transaction_id(&ctx.account.username, &ctx.client, "GET", url.path()).await;
-        let response = ctx
-            .client
-            .get(url)
-            .query(params)
+        let url = self.normalize_url(request.url())?;
+        let method = request.method();
+        let transaction_id = self
+            .transaction_id(&ctx.account.username, &ctx.client, method.as_str(), url.path())
+            .await;
+        let builder = ctx.client.request(method, url);
+        let builder = match request {
+            QueueRequest::Get { params, .. } => builder.query(params),
+            QueueRequest::PostJson { body, .. } => builder.json(body),
+        };
+        let response = builder
             .header("x-client-transaction-id", transaction_id)
             .send()
             .await
@@ -109,15 +127,17 @@ impl QueueClient {
 
         let status = response.status();
         let headers = response.headers().clone();
-        let value =
-            response.json::<Value>().await.unwrap_or_else(|_| Value::Object(Default::default()));
-
-        check_response(&ctx.account.username, status, &headers, &value).map_err(|decision| {
-            match decision {
-                RequestDecision::RetryNewAccount | RequestDecision::RetrySame => decision,
-                RequestDecision::Abort(message) => RequestDecision::Abort(message),
+        let value = match response.json::<Value>().await {
+            Ok(value) => value,
+            Err(error) if status.is_success() => {
+                return Err(RequestDecision::Abort(format!(
+                    "invalid JSON response for successful request: {error}"
+                )));
             }
-        })?;
+            Err(_) => Value::Object(Default::default()),
+        };
+
+        check_response(&ctx.account.username, status, &headers, &value)?;
 
         ctx.req_count += 1;
         Ok(QueueResponse { account_username: ctx.account.username.clone(), status, headers, value })
@@ -168,6 +188,27 @@ impl QueueClient {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum QueueRequest<'a> {
+    Get { url: &'a str, params: &'a [(String, String)] },
+    PostJson { url: &'a str, body: &'a Value },
+}
+
+impl QueueRequest<'_> {
+    fn method(&self) -> Method {
+        match self {
+            Self::Get { .. } => Method::GET,
+            Self::PostJson { .. } => Method::POST,
+        }
+    }
+
+    fn url(&self) -> &str {
+        match self {
+            Self::Get { url, .. } | Self::PostJson { url, .. } => url,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct QueueSession {
     client: QueueClient,
@@ -180,6 +221,14 @@ impl QueueSession {
         url: &str,
         params: Vec<(String, String)>,
     ) -> Result<Option<QueueResponse>> {
+        self.request(QueueRequest::Get { url, params: &params }).await
+    }
+
+    pub async fn post_json(&mut self, url: &str, body: Value) -> Result<Option<QueueResponse>> {
+        self.request(QueueRequest::PostJson { url, body: &body }).await
+    }
+
+    async fn request(&mut self, request: QueueRequest<'_>) -> Result<Option<QueueResponse>> {
         let mut unknown_retry = 0;
         loop {
             if self.ctx.is_none() {
@@ -189,9 +238,9 @@ impl QueueSession {
                 return Ok(None);
             };
 
-            match self.client.request_with_context(ctx, url, &params).await {
+            match self.client.request_with_context(ctx, request).await {
                 Ok(response) => return Ok(Some(response)),
-                Err(RequestDecision::RetrySame) => {
+                Err(RequestDecision::RetrySame(reason)) => {
                     unknown_retry += 1;
                     if unknown_retry >= 3 {
                         let username = ctx.account.username.clone();
@@ -204,7 +253,10 @@ impl QueueSession {
                             req_count,
                         )?;
                         self.ctx = None;
-                        return Ok(None);
+                        return Err(XScraperError::RequestAborted(format!(
+                            "queue {} failed after {unknown_retry} retries for account {username}: {reason}",
+                            self.client.queue
+                        )));
                     }
                 }
                 Err(RequestDecision::RetryNewAccount) => {
@@ -228,7 +280,7 @@ impl QueueSession {
 
 #[derive(Debug)]
 enum RequestDecision {
-    RetrySame,
+    RetrySame(String),
     RetryNewAccount,
     Abort(String),
 }
@@ -282,7 +334,9 @@ fn check_response(
     }
 
     if !status.is_success() {
-        return Err(RequestDecision::RetrySame);
+        return Err(RequestDecision::RetrySame(format!(
+            "status={status} remaining={remaining} reset={reset} error={err_msg}"
+        )));
     }
 
     Ok(())

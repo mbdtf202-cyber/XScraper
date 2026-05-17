@@ -1,6 +1,7 @@
 use tempfile::{TempDir, tempdir};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+use xscraper::error::XScraperError;
 use xscraper::pool::{AccountsPool, AddAccount};
 use xscraper::queue_client::QueueClient;
 
@@ -100,4 +101,59 @@ async fn switches_account_on_http_error_and_keeps_failed_account_locked() {
 
     session.close().await.unwrap();
     assert_eq!(locked(&pool), vec!["user1"]);
+}
+
+#[tokio::test]
+async fn repeated_retryable_errors_return_error_instead_of_empty_response() {
+    unsafe { std::env::set_var("XSCRAPER_DISABLE_XCLID", "1") };
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let pool = AccountsPool::new(db);
+    pool.add_account(AddAccount {
+        username: "user1".into(),
+        password: "pass1".into(),
+        email: "email1@example.com".into(),
+        email_password: "email_pass1".into(),
+        ..AddAccount::default()
+    })
+    .unwrap();
+    pool.set_active("user1", true).unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({})))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let client = QueueClient::new(pool.clone(), "SearchTimeline").with_base_url(server.uri());
+    let mut session = client.open().await.unwrap();
+    let err = session.get("/api", Vec::new()).await.unwrap_err();
+
+    assert!(matches!(err, XScraperError::RequestAborted(_)));
+    assert_eq!(locked(&pool), vec!["user1"]);
+}
+
+#[tokio::test]
+async fn successful_non_json_response_is_reported_as_error() {
+    unsafe { std::env::set_var("XSCRAPER_DISABLE_XCLID", "1") };
+    let (_dir, pool) = pool();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>blocked</html>"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QueueClient::new(pool.clone(), "SearchTimeline").with_base_url(server.uri());
+    let mut session = client.open().await.unwrap();
+    let err = session.get("/api", Vec::new()).await.unwrap_err();
+
+    assert!(
+        matches!(err, XScraperError::RequestAborted(message) if message.contains("invalid JSON response"))
+    );
+    session.close().await.unwrap();
+    assert!(locked(&pool).is_empty());
 }

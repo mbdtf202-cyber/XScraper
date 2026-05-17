@@ -6,7 +6,9 @@ mod support {
     pub mod sample_payloads;
 }
 
-use support::sample_payloads::{search_payload, trend_payload, tweet_payload, user_payload};
+use support::sample_payloads::{
+    current_search_payload, search_payload, trend_payload, tweet_payload, user_payload,
+};
 
 fn check_user_ref(user: &UserRef) {
     assert_eq!(user.id.to_string(), user.id_str);
@@ -69,6 +71,18 @@ fn parses_search_payload() {
     for tweet in &tweets {
         check_tweet(tweet);
     }
+}
+
+#[test]
+fn parses_current_search_user_shape() {
+    let tweets = parse_tweets(&current_search_payload(), 20);
+
+    assert_eq!(tweets.len(), 1);
+    assert_eq!(tweets[0].id, 3001);
+    assert_eq!(tweets[0].user.id, 4001);
+    assert_eq!(tweets[0].user.username, "current_user");
+    assert_eq!(tweets[0].user.displayname, "Current User");
+    assert_eq!(tweets[0].user.profile_image_url, "https://example.com/current-avatar.jpg");
 }
 
 #[test]
