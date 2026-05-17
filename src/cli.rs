@@ -79,6 +79,10 @@ pub enum Command {
     ListTimeline(ListArgs),
     Trends(TrendArgs),
     Bookmarks(LimitOnlyArgs),
+    #[command(alias = "analyze_account")]
+    AnalyzeAccount(AnalyzeAccountArgs),
+    #[command(alias = "compare_accounts")]
+    CompareAccounts(CompareAccountsArgs),
     Doctor(DoctorArgs),
     #[command(alias = "parse_fixture")]
     ParseFixture(ParseFixtureArgs),
@@ -201,6 +205,24 @@ pub struct LimitOnlyArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct AnalyzeAccountArgs {
+    pub account: String,
+    #[arg(long, default_value_t = 7)]
+    pub days: i64,
+    #[arg(long, default_value_t = 100)]
+    pub limit: i64,
+}
+
+#[derive(Debug, Args)]
+pub struct CompareAccountsArgs {
+    pub accounts: Vec<String>,
+    #[arg(long, default_value_t = 7)]
+    pub days: i64,
+    #[arg(long, default_value_t = 100)]
+    pub limit: i64,
+}
+
+#[derive(Debug, Args)]
 pub struct DoctorArgs {
     #[command(subcommand)]
     pub command: DoctorCommand,
@@ -211,6 +233,7 @@ pub enum DoctorCommand {
     Security,
     Imap(DoctorImapArgs),
     Xclid(DoctorXclidArgs),
+    Drift(DoctorDriftArgs),
 }
 
 #[derive(Debug, Args)]
@@ -222,6 +245,12 @@ pub struct DoctorImapArgs {
 pub struct DoctorXclidArgs {
     #[arg(long)]
     pub offline: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorDriftArgs {
+    #[arg(long)]
+    pub live: bool,
 }
 
 #[derive(Debug, Args)]
@@ -412,6 +441,20 @@ pub async fn run(cli: Cli) -> Result<()> {
             print_pages(api.bookmarks_raw(args.limit, None).await?)?
         }
         Command::Bookmarks(args) => print_items(api.bookmarks(args.limit, None).await?)?,
+        Command::AnalyzeAccount(args) => print_json(
+            &crate::analysis::analyze_account(&api, &args.account, args.days, args.limit).await?,
+        )?,
+        Command::CompareAccounts(args) => {
+            if args.accounts.is_empty() {
+                return Err(crate::error::XScraperError::Config(
+                    "compare-accounts requires at least one account".into(),
+                ));
+            }
+            print_json(
+                &crate::analysis::compare_accounts(&api, &args.accounts, args.days, args.limit)
+                    .await?,
+            )?
+        }
         Command::Doctor(args) => run_doctor(args).await?,
         Command::ParseFixture(args) => {
             let raw = std::fs::read_to_string(&args.file)
@@ -440,8 +483,27 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
             println!("imap: ok email={} host={host}", args.email);
         }
         DoctorCommand::Xclid(args) => doctor_xclid(args).await?,
+        DoctorCommand::Drift(args) => doctor_drift(args).await?,
     }
     Ok(())
+}
+
+async fn doctor_drift(args: DoctorDriftArgs) -> Result<()> {
+    if !args.live {
+        return Err(crate::error::XScraperError::Config(
+            "doctor drift requires --live to fetch current X frontend assets".into(),
+        ));
+    }
+    let report = crate::drift::fetch_live_report().await?;
+    if report.ok {
+        println!("{}", serde_json::to_string(&report)?);
+        Ok(())
+    } else {
+        Err(crate::error::XScraperError::Config(format!(
+            "frontend drift detected: {}",
+            serde_json::to_string(&report)?
+        )))
+    }
 }
 
 fn doctor_security() -> Result<()> {

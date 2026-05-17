@@ -1,7 +1,9 @@
 pub mod account;
+pub mod analysis;
 pub mod api;
 pub mod cli;
 pub mod config;
+pub mod drift;
 pub mod error;
 pub mod gql;
 pub mod imap;

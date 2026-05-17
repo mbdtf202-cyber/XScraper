@@ -13,6 +13,13 @@ fn write_sample_user_payload() -> tempfile::NamedTempFile {
     file
 }
 
+fn write_current_search_payload() -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), support::sample_payloads::current_search_payload().to_string())
+        .unwrap();
+    file
+}
+
 #[test]
 fn account_pool_adds_locks_and_unlocks_accounts() {
     let dir = tempdir().unwrap();
@@ -50,6 +57,17 @@ fn cli_can_parse_fixture_without_accounts() {
         .assert()
         .success()
         .stdout(contains("xscraper_dev"));
+}
+
+#[test]
+fn cli_parse_fixture_handles_current_search_tweets() {
+    let payload = write_current_search_payload();
+    let mut cmd = Command::cargo_bin("xscraper").unwrap();
+    cmd.args(["parse-fixture", payload.path().to_str().unwrap(), "tweets"])
+        .assert()
+        .success()
+        .stdout(contains("current_user"))
+        .stdout(contains("Current X payload"));
 }
 
 #[test]
