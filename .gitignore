@@ -1,0 +1,11 @@
+/target/
+/accounts.db*
+/criterion/
+/.local/
+/.env
+/.env.*
+!/config/*.example.*
+*.log
+*.profraw
+*.profdata
+.DS_Store

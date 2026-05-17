@@ -1,0 +1,53 @@
+[package]
+name = "xscraper"
+version = "0.1.0"
+edition = "2024"
+authors = ["XScraper contributors"]
+description = "Async Rust X/Twitter GraphQL scraper with account pooling, SQLite sessions, CLI, and typed JSON models."
+license = "MIT"
+repository = "https://github.com/mbdtf202-cyber/XScraper"
+readme = "README.md"
+keywords = ["twitter", "x", "scraper", "graphql", "rust"]
+categories = ["command-line-utilities", "web-programming::http-client"]
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3"
+imap = { version = "3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
+once_cell = "1"
+rand = "0.9"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "deflate", "cookies"] }
+rusqlite = { version = "0.37", features = ["bundled", "chrono", "serde_json"] }
+scraper = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+totp-rs = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+urlencoding = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+criterion = { version = "0.7", features = ["html_reports"] }
+predicates = "3"
+tempfile = "3"
+wiremock = "0.6"
+
+[lib]
+name = "xscraper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xscraper"
+path = "src/main.rs"
+
+[[bench]]
+name = "parser_bench"
+harness = false

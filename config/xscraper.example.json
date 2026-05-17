@@ -1,0 +1,6 @@
+{
+  "db": "accounts.db",
+  "proxy": null,
+  "base_url": "https://x.com",
+  "raise_when_no_account": false
+}

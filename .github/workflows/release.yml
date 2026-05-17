@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package Unix
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist/xscraper-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/xscraper dist/xscraper-${{ matrix.target }}/
+          cp README.md LICENSE dist/xscraper-${{ matrix.target }}/
+          tar -C dist -czf dist/xscraper-${{ matrix.target }}.tar.gz xscraper-${{ matrix.target }}
+      - name: Package Windows
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/xscraper-${{ matrix.target }}
+          Copy-Item target/${{ matrix.target }}/release/xscraper.exe dist/xscraper-${{ matrix.target }}/
+          Copy-Item README.md,LICENSE dist/xscraper-${{ matrix.target }}/
+          Compress-Archive -Path dist/xscraper-${{ matrix.target }} -DestinationPath dist/xscraper-${{ matrix.target }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xscraper-${{ matrix.target }}
+          path: dist/xscraper-${{ matrix.target }}.*
+
+  publish:
+    name: publish github release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
