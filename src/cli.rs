@@ -35,6 +35,7 @@ pub struct Cli {
 pub enum Command {
     Version,
     Accounts,
+    Health,
     Stats,
     #[command(alias = "add_accounts")]
     AddAccounts(AddAccountsArgs),
@@ -50,6 +51,7 @@ pub enum Command {
     ReloginFailed(LoginArgs),
     #[command(alias = "reset_locks")]
     ResetLocks,
+    UnlockAccount(UsernameArgs),
     Search(SearchArgs),
     #[command(alias = "search_trend")]
     SearchTrend(SearchArgs),
@@ -311,6 +313,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 stats.total, stats.active, stats.inactive
             );
         }
+        Command::Health => print_json(&pool.health_report()?)?,
         Command::AddAccounts(args) => {
             let added = pool.load_from_file(args.file_path, &args.line_format)?;
             println!("Added {added} account(s). Cookie accounts are active immediately.");
@@ -338,23 +341,22 @@ pub async fn run(cli: Cli) -> Result<()> {
             pool.reset_locks()?;
             println!("locks reset");
         }
+        Command::UnlockAccount(args) => {
+            let removed = pool.unlock_account(&args.username)?;
+            println!("Unlocked {removed} queue lock(s) for {}", args.username);
+        }
         Command::Search(args) if args.raw => {
             print_pages(api.search_raw(&args.query, args.limit, args.kv).await?)?
         }
         Command::Search(args) => print_items(api.search(&args.query, args.limit, args.kv).await?)?,
-        Command::SearchTrend(args) if args.raw => print_pages(
-            api.search_raw(
-                &args.query,
-                args.limit,
-                Some(crate::gql::merge_json(
-                    serde_json::json!({ "querySource": "trend_click" }),
-                    args.kv,
-                )),
-            )
-            .await?,
-        )?,
+        Command::SearchTrend(args) if args.raw => {
+            print_pages(api.search_trend_raw(&args.query, args.limit, args.kv).await?)?
+        }
         Command::SearchTrend(args) => {
             print_items(api.search_trend(&args.query, args.limit, args.kv).await?)?
+        }
+        Command::SearchUser(args) if args.raw => {
+            print_pages(api.search_user_raw(&args.query, args.limit, args.kv).await?)?
         }
         Command::SearchUser(args) => print_items(api.search_user(&args.query, args.limit).await?)?,
         Command::TweetDetails(args) if args.raw => {

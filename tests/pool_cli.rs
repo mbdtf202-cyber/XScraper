@@ -102,3 +102,52 @@ fn cli_add_cookie_marks_account_active() {
     assert!(account.active);
     assert_eq!(account.cookies["ct0"], "csrf");
 }
+
+#[test]
+fn cli_health_outputs_json_account_report() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("accounts.db");
+    let pool = AccountsPool::new(&db);
+    pool.add_account(AddAccount {
+        username: "user1".into(),
+        password: "pass1".into(),
+        email: "email1".into(),
+        email_password: "email_pass1".into(),
+        ..AddAccount::default()
+    })
+    .unwrap();
+    pool.set_active("user1", true).unwrap();
+    let _ = pool.get_for_queue("SearchTimeline").unwrap().unwrap();
+
+    let mut cmd = Command::cargo_bin("xscraper").unwrap();
+    cmd.args(["--db", db.to_str().unwrap(), "health"])
+        .assert()
+        .success()
+        .stdout(contains("\"lockedQueues\""))
+        .stdout(contains("\"SearchTimeline\""));
+}
+
+#[test]
+fn cli_unlock_account_clears_runtime_locks() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("accounts.db");
+    let pool = AccountsPool::new(&db);
+    pool.add_account(AddAccount {
+        username: "user1".into(),
+        password: "pass1".into(),
+        email: "email1".into(),
+        email_password: "email_pass1".into(),
+        ..AddAccount::default()
+    })
+    .unwrap();
+    pool.set_active("user1", true).unwrap();
+    let _ = pool.get_for_queue("SearchTimeline").unwrap().unwrap();
+
+    let mut cmd = Command::cargo_bin("xscraper").unwrap();
+    cmd.args(["--db", db.to_str().unwrap(), "unlock-account", "user1"])
+        .assert()
+        .success()
+        .stdout(contains("Unlocked 1 queue lock(s) for user1"));
+
+    assert!(pool.get("user1").unwrap().locks.is_empty());
+}

@@ -22,20 +22,56 @@ fn gql_params_allow_kv_count_override_for_generator_methods() {
     let api = Api::new(AccountsPool::new(dir.path().join("test.db")));
     for (method, arg) in [
         ("search", "rust"),
+        ("search_user", "rust"),
+        ("search_trend", "rust"),
+        ("tweet_details", "123"),
         ("tweet_replies", "123"),
         ("retweeters", "123"),
         ("followers", "123"),
         ("following", "123"),
+        ("verified_followers", "123"),
+        ("subscriptions", "123"),
         ("user_tweets", "123"),
         ("user_tweets_and_replies", "123"),
+        ("user_media", "123"),
         ("list_timeline", "123"),
         ("trends", "sport"),
+        ("bookmarks", ""),
     ] {
         let request = api.operation_request(method, arg, Some(json!({ "count": 100 }))).unwrap();
         assert_eq!(request.variables["count"], 100, "{method}");
         assert!(!request.op.is_empty(), "{method}");
         assert!(!request.queue.is_empty(), "{method}");
     }
+}
+
+#[test]
+fn operation_request_accepts_hyphenated_cli_names() {
+    let dir = tempdir().unwrap();
+    let api = Api::new(AccountsPool::new(dir.path().join("test.db")));
+
+    let request =
+        api.operation_request("verified-followers", "123", Some(json!({ "count": 7 }))).unwrap();
+
+    assert_eq!(request.queue, "BlueVerifiedFollowers");
+    assert_eq!(request.variables["count"], 7);
+}
+
+#[test]
+fn search_variants_have_distinct_products_and_sources() {
+    let dir = tempdir().unwrap();
+    let api = Api::new(AccountsPool::new(dir.path().join("test.db")));
+
+    let search = api.operation_request("search", "rust", None).unwrap();
+    let users = api.operation_request("search-user", "rust", None).unwrap();
+    let trends = api.operation_request("search-trend", "rust", None).unwrap();
+
+    assert_eq!(search.variables["product"], "Latest");
+    assert_eq!(search.variables["querySource"], "typed_query");
+    assert_eq!(users.variables["product"], "People");
+    assert_eq!(users.variables["querySource"], "typed_query");
+    assert_eq!(trends.variables["product"], "Latest");
+    assert_eq!(trends.variables["querySource"], "trend_click");
 }
 
 #[tokio::test]

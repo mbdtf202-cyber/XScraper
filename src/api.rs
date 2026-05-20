@@ -1,6 +1,8 @@
-use crate::error::Result;
-use crate::gql::*;
+use crate::error::{Result, XScraperError};
+use crate::gql::{default_features, merge_json};
 use crate::models::{Trend, Tweet, User};
+pub use crate::operations::OperationRequest;
+use crate::operations::{OperationMode, operation_request};
 use crate::parser;
 use crate::pool::AccountsPool;
 use crate::queue_client::QueueClient;
@@ -17,15 +19,6 @@ pub struct Api {
 pub struct ApiConfig {
     pub proxy: Option<String>,
     pub base_url: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct OperationRequest {
-    pub op: &'static str,
-    pub queue: &'static str,
-    pub variables: Value,
-    pub features: Option<Value>,
-    pub cursor_type: &'static str,
 }
 
 impl Default for ApiConfig {
@@ -49,18 +42,7 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        let variables = merge_json(
-            json!({
-                "rawQuery": query,
-                "count": 20,
-                "product": "Latest",
-                "querySource": "typed_query",
-                "withGrokTranslatedBio": false,
-                "withQuickPromoteEligibilityTweetFields": false
-            }),
-            kv,
-        );
-        self.gql_items(OP_SEARCH_TIMELINE, variables, None, limit, "Bottom").await
+        self.gql_items_request(self.request("search", query, kv)?, limit).await
     }
 
     pub fn operation_request(
@@ -86,7 +68,7 @@ impl Api {
 
     pub async fn search_user(&self, query: &str, limit: i64) -> Result<Vec<User>> {
         let mut users = Vec::new();
-        for page in self.search_raw(query, limit, Some(json!({ "product": "People" }))).await? {
+        for page in self.search_user_raw(query, limit, None).await? {
             users.extend(parser::parse_users(&page, limit));
             if limit >= 0 && users.len() >= limit as usize {
                 users.truncate(limit as usize);
@@ -96,24 +78,17 @@ impl Api {
         Ok(users)
     }
 
+    pub async fn search_user_raw(
+        &self,
+        query: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        self.gql_items_request(self.request("search_user", query, kv)?, limit).await
+    }
+
     pub async fn user_by_id_raw(&self, user_id: u64, kv: Option<Value>) -> Result<Option<Value>> {
-        let variables = merge_json(
-            json!({
-                "userId": user_id.to_string(),
-                "withSafetyModeUserFields": true
-            }),
-            kv,
-        );
-        let features = json!({
-            "hidden_profile_likes_enabled": true,
-            "highlights_tweets_tab_ui_enabled": true,
-            "creator_subscriptions_tweet_preview_api_enabled": true,
-            "hidden_profile_subscriptions_enabled": true,
-            "responsive_web_twitter_article_notes_tab_enabled": false,
-            "subscriptions_feature_can_gift_premium": false,
-            "profile_label_improvements_pcf_label_in_post_enabled": false
-        });
-        self.gql_item(OP_USER_BY_REST_ID, variables, Some(features)).await
+        self.gql_item_request(self.request("user_by_id", &user_id.to_string(), kv)?).await
     }
 
     pub async fn user_by_id(&self, user_id: u64, kv: Option<Value>) -> Result<Option<User>> {
@@ -121,25 +96,7 @@ impl Api {
     }
 
     pub async fn user_by_login_raw(&self, login: &str, kv: Option<Value>) -> Result<Option<Value>> {
-        let variables = merge_json(
-            json!({
-                "screen_name": login,
-                "withSafetyModeUserFields": true
-            }),
-            kv,
-        );
-        let features = json!({
-            "highlights_tweets_tab_ui_enabled": true,
-            "hidden_profile_likes_enabled": true,
-            "creator_subscriptions_tweet_preview_api_enabled": true,
-            "hidden_profile_subscriptions_enabled": true,
-            "subscriptions_verification_info_verified_since_enabled": true,
-            "subscriptions_verification_info_is_identity_verified_enabled": false,
-            "responsive_web_twitter_article_notes_tab_enabled": false,
-            "subscriptions_feature_can_gift_premium": false,
-            "profile_label_improvements_pcf_label_in_post_enabled": false
-        });
-        self.gql_item(OP_USER_BY_SCREEN_NAME, variables, Some(features)).await
+        self.gql_item_request(self.request("user_by_login", login, kv)?).await
     }
 
     pub async fn user_by_login(&self, login: &str, kv: Option<Value>) -> Result<Option<User>> {
@@ -151,20 +108,7 @@ impl Api {
         tweet_id: u64,
         kv: Option<Value>,
     ) -> Result<Option<Value>> {
-        let variables = merge_json(
-            json!({
-                "focalTweetId": tweet_id.to_string(),
-                "with_rux_injections": true,
-                "includePromotedContent": true,
-                "withCommunity": true,
-                "withQuickPromoteEligibilityTweetFields": true,
-                "withBirdwatchNotes": true,
-                "withVoice": true,
-                "withV2Timeline": true
-            }),
-            kv,
-        );
-        self.gql_item(OP_TWEET_DETAIL, variables, None).await
+        self.gql_item_request(self.request("tweet_details", &tweet_id.to_string(), kv)?).await
     }
 
     pub async fn tweet_details(&self, tweet_id: u64, kv: Option<Value>) -> Result<Option<Tweet>> {
@@ -180,21 +124,8 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        let variables = merge_json(
-            json!({
-                "focalTweetId": tweet_id.to_string(),
-                "referrer": "tweet",
-                "with_rux_injections": true,
-                "includePromotedContent": true,
-                "withCommunity": true,
-                "withQuickPromoteEligibilityTweetFields": true,
-                "withBirdwatchNotes": true,
-                "withVoice": true,
-                "withV2Timeline": true
-            }),
-            kv,
-        );
-        self.gql_items(OP_TWEET_DETAIL, variables, None, limit, "ShowMoreThreads").await
+        self.gql_items_request(self.request("tweet_replies", &tweet_id.to_string(), kv)?, limit)
+            .await
     }
 
     pub async fn tweet_replies(
@@ -234,17 +165,7 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_FOLLOWERS,
-            merge_json(
-                json!({ "userId": user_id.to_string(), "count": 20, "includePromotedContent": false }),
-                kv,
-            ),
-            Some(json!({ "responsive_web_twitter_article_notes_tab_enabled": false })),
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("followers", &user_id.to_string(), kv)?, limit).await
     }
 
     pub async fn following(
@@ -263,17 +184,7 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_FOLLOWING,
-            merge_json(
-                json!({ "userId": user_id.to_string(), "count": 20, "includePromotedContent": false }),
-                kv,
-            ),
-            None,
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("following", &user_id.to_string(), kv)?, limit).await
     }
 
     pub async fn verified_followers(
@@ -292,17 +203,8 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_BLUE_VERIFIED_FOLLOWERS,
-            merge_json(
-                json!({ "userId": user_id.to_string(), "count": 20, "includePromotedContent": false }),
-                kv,
-            ),
-            Some(json!({ "responsive_web_twitter_article_notes_tab_enabled": true })),
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("verified_followers", &user_id.to_string(), kv)?, limit)
+            .await
     }
 
     pub async fn subscriptions(
@@ -321,17 +223,8 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_USER_CREATOR_SUBSCRIPTIONS,
-            merge_json(
-                json!({ "userId": user_id.to_string(), "count": 20, "includePromotedContent": false }),
-                kv,
-            ),
-            None,
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("subscriptions", &user_id.to_string(), kv)?, limit)
+            .await
     }
 
     pub async fn retweeters(
@@ -350,17 +243,7 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_RETWEETERS,
-            merge_json(
-                json!({ "tweetId": tweet_id.to_string(), "count": 20, "includePromotedContent": true }),
-                kv,
-            ),
-            None,
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("retweeters", &tweet_id.to_string(), kv)?, limit).await
     }
 
     pub async fn user_tweets(
@@ -379,24 +262,7 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_USER_TWEETS,
-            merge_json(
-                json!({
-                    "userId": user_id.to_string(),
-                    "count": 40,
-                    "includePromotedContent": true,
-                    "withQuickPromoteEligibilityTweetFields": true,
-                    "withVoice": true,
-                    "withV2Timeline": true
-                }),
-                kv,
-            ),
-            None,
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("user_tweets", &user_id.to_string(), kv)?, limit).await
     }
 
     pub async fn user_tweets_and_replies(
@@ -415,22 +281,9 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_USER_TWEETS_AND_REPLIES,
-            merge_json(
-                json!({
-                    "userId": user_id.to_string(),
-                    "count": 40,
-                    "includePromotedContent": true,
-                    "withCommunity": true,
-                    "withVoice": true,
-                    "withV2Timeline": true
-                }),
-                kv,
-            ),
-            None,
+        self.gql_items_request(
+            self.request("user_tweets_and_replies", &user_id.to_string(), kv)?,
             limit,
-            "Bottom",
         )
         .await
     }
@@ -458,25 +311,7 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_USER_MEDIA,
-            merge_json(
-                json!({
-                    "userId": user_id.to_string(),
-                    "count": 40,
-                    "includePromotedContent": false,
-                    "withClientEventToken": false,
-                    "withBirdwatchNotes": false,
-                    "withVoice": true,
-                    "withV2Timeline": true
-                }),
-                kv,
-            ),
-            None,
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("user_media", &user_id.to_string(), kv)?, limit).await
     }
 
     pub async fn list_timeline(
@@ -495,14 +330,8 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_LIST_LATEST_TWEETS_TIMELINE,
-            merge_json(json!({ "listId": list_id.to_string(), "count": 20 }), kv),
-            None,
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("list_timeline", &list_id.to_string(), kv)?, limit)
+            .await
     }
 
     pub async fn trends(&self, trend: &str, limit: i64, kv: Option<Value>) -> Result<Vec<Trend>> {
@@ -524,15 +353,7 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        let variables = merge_json(
-            json!({
-                "timelineId": trend_id(trend),
-                "count": 20,
-                "withQuickPromoteEligibilityTweetFields": true
-            }),
-            kv,
-        );
-        self.gql_items(OP_GENERIC_TIMELINE_BY_ID, variables, None, limit, "Bottom").await
+        self.gql_items_request(self.request("trends", trend, kv)?, limit).await
     }
 
     pub async fn search_trend(
@@ -541,8 +362,17 @@ impl Api {
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Tweet>> {
-        self.search(query, limit, Some(merge_json(json!({ "querySource": "trend_click" }), kv)))
-            .await
+        let pages = self.search_trend_raw(query, limit, kv).await?;
+        Ok(parse_tweets_from_pages(pages, limit))
+    }
+
+    pub async fn search_trend_raw(
+        &self,
+        query: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        self.gql_items_request(self.request("search_trend", query, kv)?, limit).await
     }
 
     pub async fn bookmarks(&self, limit: i64, kv: Option<Value>) -> Result<Vec<Tweet>> {
@@ -551,38 +381,33 @@ impl Api {
     }
 
     pub async fn bookmarks_raw(&self, limit: i64, kv: Option<Value>) -> Result<Vec<Value>> {
-        self.gql_items(
-            OP_BOOKMARKS,
-            merge_json(
-                json!({
-                    "count": 20,
-                    "includePromotedContent": false,
-                    "withClientEventToken": false,
-                    "withBirdwatchNotes": false,
-                    "withVoice": true,
-                    "withV2Timeline": true
-                }),
-                kv,
-            ),
-            Some(json!({ "graphql_timeline_v2_bookmark_timeline": true })),
-            limit,
-            "Bottom",
-        )
-        .await
+        self.gql_items_request(self.request("bookmarks", "", kv)?, limit).await
     }
 
-    async fn gql_item(
+    fn request(
         &self,
-        op: &str,
-        variables: Value,
-        features: Option<Value>,
-    ) -> Result<Option<Value>> {
-        let queue = op_name(op);
-        let client = self.queue_client(queue);
+        operation: &str,
+        id_or_query: &str,
+        kv: Option<Value>,
+    ) -> Result<OperationRequest> {
+        operation_request(operation, id_or_query, kv).ok_or_else(|| {
+            XScraperError::Config(format!("unsupported GraphQL operation request: {operation}"))
+        })
+    }
+
+    async fn gql_item_request(&self, request: OperationRequest) -> Result<Option<Value>> {
+        if request.mode != OperationMode::Item {
+            return Err(XScraperError::Config(format!(
+                "operation {} is not an item request",
+                request.queue
+            )));
+        }
+
+        let client = self.queue_client(request.queue);
         let mut session = client.open().await?;
-        let body = gql_body(variables, features, None);
+        let body = gql_body(request.variables, request.features, request.field_toggles);
         let result = session
-            .post_json(&gql_path(op), body)
+            .post_json(&gql_path(request.op), body)
             .await
             .map(|response| response.map(|response| response.value));
         let close_result = session.close().await;
@@ -593,18 +418,20 @@ impl Api {
         }
     }
 
-    async fn gql_items(
-        &self,
-        op: &str,
-        mut variables: Value,
-        features: Option<Value>,
-        limit: i64,
-        cursor_type: &str,
-    ) -> Result<Vec<Value>> {
-        let queue = op_name(op);
-        let client = self.queue_client(queue);
+    async fn gql_items_request(&self, request: OperationRequest, limit: i64) -> Result<Vec<Value>> {
+        if request.mode != OperationMode::Timeline {
+            return Err(XScraperError::Config(format!(
+                "operation {} is not a timeline request",
+                request.queue
+            )));
+        }
+
+        let client = self.queue_client(request.queue);
         let mut session = client.open().await?;
         let result: Result<Vec<Value>> = async {
+            let mut variables = request.variables;
+            let features = request.features;
+            let field_toggles = request.field_toggles;
             let mut cursor: Option<String> = None;
             let mut total = 0usize;
             let mut pages = Vec::new();
@@ -614,8 +441,8 @@ impl Api {
                     variables["cursor"] = Value::String(cursor.clone());
                 }
 
-                let body = gql_body(variables.clone(), features.clone(), field_toggles(queue));
-                let Some(response) = session.post_json(&gql_path(op), body).await? else {
+                let body = gql_body(variables.clone(), features.clone(), field_toggles.clone());
+                let Some(response) = session.post_json(&gql_path(request.op), body).await? else {
                     break;
                 };
 
@@ -624,7 +451,7 @@ impl Api {
                     .pointer("/data")
                     .and_then(|_| count_entries(&response.value))
                     .unwrap_or_default();
-                cursor = find_cursor(&response.value, cursor_type);
+                cursor = find_cursor(&response.value, request.cursor_type);
                 total += entries;
 
                 let has_items = entries > 0;
@@ -667,27 +494,6 @@ fn gql_body(variables: Value, features: Option<Value>, field_toggles: Option<Val
 
 fn gql_path(op: &str) -> String {
     format!("/i/api/graphql/{op}")
-}
-
-fn field_toggles(queue: &str) -> Option<Value> {
-    match queue {
-        "SearchTimeline" | "ListLatestTweetsTimeline" => Some(default_field_toggles()),
-        "UserMedia" => Some(json!({ "withArticlePlainText": false })),
-        _ => None,
-    }
-}
-
-fn default_field_toggles() -> Value {
-    json!({
-        "withPayments": false,
-        "withAuxiliaryUserLabels": false,
-        "withArticleRichContentState": false,
-        "withArticlePlainText": false,
-        "withArticleSummaryText": false,
-        "withArticleVoiceOver": false,
-        "withGrokAnalyze": false,
-        "withDisallowedReplyControls": false
-    })
 }
 
 fn find_cursor(value: &Value, cursor_type: &str) -> Option<String> {
@@ -737,138 +543,4 @@ fn parse_tweets_from_pages(pages: Vec<Value>, limit: i64) -> Vec<Tweet> {
         }
     }
     tweets
-}
-
-fn operation_request(
-    operation: &str,
-    id_or_query: &str,
-    kv: Option<Value>,
-) -> Option<OperationRequest> {
-    let id = || id_or_query.parse::<u64>().ok();
-    let request = match operation {
-        "search" => OperationRequest {
-            op: OP_SEARCH_TIMELINE,
-            queue: "SearchTimeline",
-            variables: merge_json(
-                json!({
-                    "rawQuery": id_or_query,
-                    "count": 20,
-                    "product": "Latest",
-                    "querySource": "typed_query",
-                    "withGrokTranslatedBio": false,
-                    "withQuickPromoteEligibilityTweetFields": false
-                }),
-                kv,
-            ),
-            features: None,
-            cursor_type: "Bottom",
-        },
-        "tweet_replies" => OperationRequest {
-            op: OP_TWEET_DETAIL,
-            queue: "TweetDetail",
-            variables: merge_json(
-                json!({
-                    "focalTweetId": id()?.to_string(),
-                    "referrer": "tweet",
-                    "with_rux_injections": true,
-                    "includePromotedContent": true,
-                    "withCommunity": true,
-                    "withQuickPromoteEligibilityTweetFields": true,
-                    "withBirdwatchNotes": true,
-                    "withVoice": true,
-                    "withV2Timeline": true
-                }),
-                kv,
-            ),
-            features: None,
-            cursor_type: "ShowMoreThreads",
-        },
-        "retweeters" => OperationRequest {
-            op: OP_RETWEETERS,
-            queue: "Retweeters",
-            variables: merge_json(
-                json!({ "tweetId": id()?.to_string(), "count": 20, "includePromotedContent": true }),
-                kv,
-            ),
-            features: None,
-            cursor_type: "Bottom",
-        },
-        "followers" => OperationRequest {
-            op: OP_FOLLOWERS,
-            queue: "Followers",
-            variables: merge_json(
-                json!({ "userId": id()?.to_string(), "count": 20, "includePromotedContent": false }),
-                kv,
-            ),
-            features: Some(json!({ "responsive_web_twitter_article_notes_tab_enabled": false })),
-            cursor_type: "Bottom",
-        },
-        "following" => OperationRequest {
-            op: OP_FOLLOWING,
-            queue: "Following",
-            variables: merge_json(
-                json!({ "userId": id()?.to_string(), "count": 20, "includePromotedContent": false }),
-                kv,
-            ),
-            features: None,
-            cursor_type: "Bottom",
-        },
-        "user_tweets" => OperationRequest {
-            op: OP_USER_TWEETS,
-            queue: "UserTweets",
-            variables: merge_json(
-                json!({
-                    "userId": id()?.to_string(),
-                    "count": 40,
-                    "includePromotedContent": true,
-                    "withQuickPromoteEligibilityTweetFields": true,
-                    "withVoice": true,
-                    "withV2Timeline": true
-                }),
-                kv,
-            ),
-            features: None,
-            cursor_type: "Bottom",
-        },
-        "user_tweets_and_replies" => OperationRequest {
-            op: OP_USER_TWEETS_AND_REPLIES,
-            queue: "UserTweetsAndReplies",
-            variables: merge_json(
-                json!({
-                    "userId": id()?.to_string(),
-                    "count": 40,
-                    "includePromotedContent": true,
-                    "withCommunity": true,
-                    "withVoice": true,
-                    "withV2Timeline": true
-                }),
-                kv,
-            ),
-            features: None,
-            cursor_type: "Bottom",
-        },
-        "list_timeline" => OperationRequest {
-            op: OP_LIST_LATEST_TWEETS_TIMELINE,
-            queue: "ListLatestTweetsTimeline",
-            variables: merge_json(json!({ "listId": id()?.to_string(), "count": 20 }), kv),
-            features: None,
-            cursor_type: "Bottom",
-        },
-        "trends" => OperationRequest {
-            op: OP_GENERIC_TIMELINE_BY_ID,
-            queue: "GenericTimelineById",
-            variables: merge_json(
-                json!({
-                    "timelineId": trend_id(id_or_query),
-                    "count": 20,
-                    "withQuickPromoteEligibilityTweetFields": true
-                }),
-                kv,
-            ),
-            features: None,
-            cursor_type: "Bottom",
-        },
-        _ => return None,
-    };
-    Some(request)
 }

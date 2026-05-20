@@ -155,6 +155,15 @@ impl AccountStore {
         Ok(())
     }
 
+    pub fn unlock_account(&self, username: &str) -> Result<usize> {
+        let mut account = self.get(username)?;
+        let removed = account.locks.len();
+        account.locks.clear();
+        account.last_used = Some(now_utc());
+        self.save(&account)?;
+        Ok(removed)
+    }
+
     pub fn get_for_queue(&self, queue: &str) -> Result<Option<Account>> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -276,26 +285,21 @@ fn migrate(conn: &Connection) -> Result<()> {
 }
 
 fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
+    let username: String = row.get("username")?;
     let locks_raw: String = row.get("locks")?;
     let stats_raw: String = row.get("stats")?;
     let headers_raw: String = row.get("headers")?;
     let cookies_raw: String = row.get("cookies")?;
     let last_used_raw: Option<String> = row.get("last_used")?;
 
-    let locks = Account::parse_locks(&locks_raw).map_err(to_sql_error)?;
-    let stats = Account::parse_stats(&stats_raw).map_err(to_sql_error)?;
-    let headers = crate::utils::parse_json_string_map(&headers_raw).map_err(to_sql_error)?;
-    let cookies = crate::utils::parse_json_string_map(&cookies_raw).map_err(to_sql_error)?;
-    let last_used = last_used_raw
-        .map(|raw| {
-            DateTime::parse_from_rfc3339(&raw)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(to_sql_error)
-        })
-        .transpose()?;
+    let locks = parse_locks_or_empty(&username, &locks_raw);
+    let stats = parse_stats_or_empty(&username, &stats_raw);
+    let headers = parse_json_map_or_empty(&username, "headers", &headers_raw);
+    let cookies = parse_json_map_or_empty(&username, "cookies", &cookies_raw);
+    let last_used = parse_last_used_or_none(&username, last_used_raw);
 
     Ok(Account {
-        username: row.get("username")?,
+        username,
         password: row.get("password")?,
         email: row.get("email")?,
         email_password: row.get("email_password")?,
@@ -312,6 +316,49 @@ fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
     })
 }
 
-fn to_sql_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+fn parse_locks_or_empty(username: &str, raw: &str) -> BTreeMap<String, DateTime<Utc>> {
+    match Account::parse_locks(raw) {
+        Ok(values) => values,
+        Err(error) => {
+            tracing::warn!(%username, field = "locks", %error, "ignoring invalid account value");
+            BTreeMap::new()
+        }
+    }
+}
+
+fn parse_stats_or_empty(username: &str, raw: &str) -> BTreeMap<String, i64> {
+    match Account::parse_stats(raw) {
+        Ok(values) => values,
+        Err(error) => {
+            tracing::warn!(%username, field = "stats", %error, "ignoring invalid account value");
+            BTreeMap::new()
+        }
+    }
+}
+
+fn parse_json_map_or_empty(
+    username: &str,
+    field: &'static str,
+    raw: &str,
+) -> BTreeMap<String, String> {
+    match crate::utils::parse_json_string_map(raw) {
+        Ok(values) => values,
+        Err(error) => {
+            tracing::warn!(%username, field, %error, "ignoring invalid account value");
+            BTreeMap::new()
+        }
+    }
+}
+
+fn parse_last_used_or_none(username: &str, raw: Option<String>) -> Option<DateTime<Utc>> {
+    match raw {
+        Some(raw) => match DateTime::parse_from_rfc3339(&raw) {
+            Ok(dt) => Some(dt.with_timezone(&Utc)),
+            Err(error) => {
+                tracing::warn!(%username, field = "last_used", %error, "ignoring invalid account value");
+                None
+            }
+        },
+        None => None,
+    }
 }

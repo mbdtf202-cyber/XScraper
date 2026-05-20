@@ -9,6 +9,7 @@ pub mod gql;
 pub mod imap;
 pub mod login;
 pub mod models;
+pub mod operations;
 pub mod parser;
 pub mod pool;
 pub mod queue_client;

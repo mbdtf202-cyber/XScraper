@@ -2,9 +2,10 @@ use crate::account::{Account, default_user_agent};
 use crate::error::{Result, XScraperError};
 use crate::login::{LoginConfig, login};
 use crate::storage::{AccountStore, PoolStats};
-use crate::utils::parse_cookies;
+use crate::utils::{now_utc, parse_cookies};
 use chrono::{DateTime, Utc};
-use std::collections::BTreeMap;
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -25,7 +26,7 @@ pub struct AddAccount {
     pub mfa_code: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AccountInfo {
     pub username: String,
     pub logged_in: bool,
@@ -35,12 +36,52 @@ pub struct AccountInfo {
     pub error_msg: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LoginSummary {
     pub total: usize,
     pub success: usize,
     pub failed: usize,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolHealthReport {
+    pub total: usize,
+    pub active: usize,
+    pub inactive: usize,
+    pub queues: BTreeMap<String, QueueHealth>,
+    pub accounts: Vec<AccountHealth>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueHealth {
+    pub active: usize,
+    pub locked: usize,
+    pub available: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountHealth {
+    pub username: String,
+    pub logged_in: bool,
+    pub active: bool,
+    #[serde(rename = "lastUsed")]
+    pub last_used: Option<DateTime<Utc>>,
+    #[serde(rename = "totalReq")]
+    pub total_req: i64,
+    #[serde(rename = "lockedQueues")]
+    pub locked_queues: Vec<QueueLockHealth>,
+    #[serde(rename = "errorMsg")]
+    pub error_msg: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueLockHealth {
+    pub queue: String,
+    #[serde(rename = "unlockAt")]
+    pub unlock_at: DateTime<Utc>,
+    #[serde(rename = "secondsRemaining")]
+    pub seconds_remaining: i64,
 }
 
 impl AccountsPool {
@@ -170,6 +211,10 @@ impl AccountsPool {
         self.store.reset_locks()
     }
 
+    pub fn unlock_account(&self, username: &str) -> Result<usize> {
+        self.store.unlock_account(username)
+    }
+
     pub fn get_for_queue(&self, queue: &str) -> Result<Option<Account>> {
         self.store.get_for_queue(queue)
     }
@@ -243,6 +288,76 @@ impl AccountsPool {
         Ok(rows)
     }
 
+    pub fn health_report(&self) -> Result<PoolHealthReport> {
+        let accounts = self.get_all()?;
+        let now = now_utc();
+        let active = accounts.iter().filter(|account| account.active).count();
+        let inactive = accounts.len().saturating_sub(active);
+        let mut queue_names = BTreeSet::new();
+
+        for account in &accounts {
+            for queue in account.stats.keys().chain(account.locks.keys()) {
+                queue_names.insert(queue.clone());
+            }
+        }
+
+        let queues = queue_names
+            .into_iter()
+            .map(|queue| {
+                let locked = accounts
+                    .iter()
+                    .filter(|account| {
+                        account.active
+                            && account.locks.get(&queue).is_some_and(|unlock_at| unlock_at > &now)
+                    })
+                    .count();
+                (queue, QueueHealth { active, locked, available: active.saturating_sub(locked) })
+            })
+            .collect();
+
+        let mut account_rows = accounts
+            .into_iter()
+            .map(|account| {
+                let mut locked_queues = account
+                    .locks
+                    .iter()
+                    .filter(|(_, unlock_at)| *unlock_at > &now)
+                    .map(|(queue, unlock_at)| QueueLockHealth {
+                        queue: queue.clone(),
+                        unlock_at: *unlock_at,
+                        seconds_remaining: (*unlock_at - now).num_seconds().max(0),
+                    })
+                    .collect::<Vec<_>>();
+                locked_queues.sort_by(|left, right| left.queue.cmp(&right.queue));
+
+                AccountHealth {
+                    username: account.username,
+                    logged_in: account.headers.contains_key("authorization")
+                        || account.cookies.contains_key("ct0"),
+                    active: account.active,
+                    last_used: account.last_used,
+                    total_req: account.stats.values().sum(),
+                    locked_queues,
+                    error_msg: account.error_msg,
+                }
+            })
+            .collect::<Vec<_>>();
+        account_rows.sort_by(|left, right| {
+            btree_bool(right.active)
+                .cmp(&btree_bool(left.active))
+                .then_with(|| right.last_used.cmp(&left.last_used))
+                .then_with(|| left.username.to_lowercase().cmp(&right.username.to_lowercase()))
+        });
+
+        Ok(PoolHealthReport {
+            total: account_rows.len(),
+            active,
+            inactive,
+            queues,
+            accounts: account_rows,
+        })
+    }
+
     pub async fn login_account(&self, mut account: Account, config: LoginConfig) -> Result<bool> {
         let success = login(&mut account, config).await?;
         self.save(&account)?;
@@ -313,6 +428,10 @@ impl AccountsPool {
             .collect::<Vec<_>>();
         self.relogin(&usernames, config).await
     }
+}
+
+fn btree_bool(value: bool) -> u8 {
+    u8::from(value)
 }
 
 fn guess_delimiter(line_format: &str) -> Result<char> {

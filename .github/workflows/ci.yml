@@ -15,9 +15,4 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets --all-features
-      - run: python3 scripts/security_check.py
-      - run: python3 scripts/xclid_drift_check.py
-      - run: python3 scripts/live_acceptance.py
+      - run: python3 scripts/release_gate.py

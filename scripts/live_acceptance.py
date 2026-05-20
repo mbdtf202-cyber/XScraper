@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,71 @@ def parse_ndjson(text: str) -> list[dict]:
     return rows
 
 
+def output_dir() -> Path:
+    out_dir = ROOT / ".local" / "live-acceptance"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def write_report(report: dict[str, Any]) -> Path:
+    out_path = output_dir() / "report.json"
+    out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    return out_path
+
+
+def redact_command(cmd: list[str]) -> str:
+    if "add-cookie" not in cmd:
+        return " ".join(cmd)
+    redacted = list(cmd)
+    idx = redacted.index("add-cookie")
+    if len(redacted) > idx + 2:
+        redacted[idx + 2] = "<redacted-cookies>"
+    return " ".join(redacted)
+
+
+def run_stage(
+    report: dict[str, Any],
+    name: str,
+    cmd: list[str],
+    env: dict[str, str],
+    parser=None,
+) -> tuple[bool, subprocess.CompletedProcess[str], Any]:
+    result = run(cmd, env)
+    stage: dict[str, Any] = {
+        "name": name,
+        "command": redact_command(cmd),
+        "returncode": result.returncode,
+        "ok": result.returncode == 0,
+    }
+    parsed: Any = None
+    if result.stdout.strip():
+        stage["stdoutPreview"] = result.stdout[:500]
+    if result.stderr.strip():
+        stage["stderrPreview"] = result.stderr[:500]
+
+    if result.returncode == 0 and parser is not None:
+        try:
+            parsed = parser(result.stdout)
+            stage.update(parsed if isinstance(parsed, dict) else {"parsed": parsed})
+        except Exception as exc:  # noqa: BLE001 - report parser failures as harness failures.
+            stage["ok"] = False
+            stage["parseError"] = str(exc)
+
+    report["stages"].append(stage)
+    return bool(stage["ok"]), result, parsed
+
+
+def health_snapshot(base: list[str], env: dict[str, str]) -> dict[str, Any] | None:
+    result = run(base + ["health"], env)
+    if result.returncode != 0:
+        return {"ok": False, "stderrPreview": result.stderr[:500]}
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "parseError": str(exc), "stdoutPreview": result.stdout[:500]}
+    return {"ok": True, "value": value}
+
+
 def main() -> int:
     query = os.environ.get("XSCRAPER_LIVE_QUERY")
     username = os.environ.get("XSCRAPER_LIVE_COOKIE_USERNAME")
@@ -77,46 +143,84 @@ def main() -> int:
     env.setdefault("XSCRAPER_RAISE_WHEN_NO_ACCOUNT", "1")
     base = xscraper_cmd()
 
-    report: dict[str, object] = {"db": str(db), "query": query, "checks": []}
+    report: dict[str, Any] = {
+        "db": str(db),
+        "query": query,
+        "ok": False,
+        "stages": [],
+        "health": {},
+    }
 
     try:
         if username and cookies:
-            result = run(base + ["add-cookie", username, cookies], env)
-            if result.returncode != 0:
+            ok, result, _ = run_stage(report, "auth.add-cookie", base + ["add-cookie", username, cookies], env)
+            if not ok:
+                report["health"]["afterFailure"] = health_snapshot(base, env)
+                path = write_report(report)
                 print(result.stderr, file=sys.stderr)
-                return result.returncode
-            report["checks"].append({"command": "add-cookie", "ok": True})
+                print(f"live acceptance: failed report={path}", file=sys.stderr)
+                return result.returncode or 1
 
-        result = run(base + ["search", query, "--limit", os.environ.get("XSCRAPER_LIVE_LIMIT", "3")], env)
-        if result.returncode != 0:
+        report["health"]["beforeSearch"] = health_snapshot(base, env)
+        ok, result, parsed = run_stage(
+            report,
+            "search",
+            base + ["search", query, "--limit", os.environ.get("XSCRAPER_LIVE_LIMIT", "3")],
+            env,
+            lambda stdout: {"count": len(parse_ndjson(stdout)), "rows": parse_ndjson(stdout)[:3]},
+        )
+        if not ok:
+            report["health"]["afterFailure"] = health_snapshot(base, env)
+            path = write_report(report)
             print(result.stderr, file=sys.stderr)
-            return result.returncode
-        tweets = parse_ndjson(result.stdout)
+            print(f"live acceptance: failed report={path}", file=sys.stderr)
+            return result.returncode or 1
+        tweets = parsed["rows"] if isinstance(parsed, dict) else []
         if not tweets:
+            report["stages"].append({"name": "parser.nonempty-search", "ok": False, "count": 0})
+            report["health"]["afterFailure"] = health_snapshot(base, env)
+            path = write_report(report)
             print("live acceptance: search returned no tweets", file=sys.stderr)
+            print(f"live acceptance: failed report={path}", file=sys.stderr)
             return 1
-        report["checks"].append({"command": "search", "count": len(tweets)})
+        report["stages"].append({"name": "parser.nonempty-search", "ok": True, "count": len(tweets)})
 
         login = os.environ.get("XSCRAPER_LIVE_USER_LOGIN")
         if login:
-            result = run(base + ["user-by-login", login], env)
-            if result.returncode != 0:
+            ok, result, _ = run_stage(
+                report,
+                "user-by-login",
+                base + ["user-by-login", login],
+                env,
+                lambda stdout: {"hasOutput": bool(stdout.strip())},
+            )
+            if not ok:
+                report["health"]["afterFailure"] = health_snapshot(base, env)
+                path = write_report(report)
                 print(result.stderr, file=sys.stderr)
-                return result.returncode
-            report["checks"].append({"command": "user-by-login", "ok": bool(result.stdout.strip())})
+                print(f"live acceptance: failed report={path}", file=sys.stderr)
+                return result.returncode or 1
 
         tweet_id = os.environ.get("XSCRAPER_LIVE_TWEET_ID")
         if tweet_id:
-            result = run(base + ["tweet-details", tweet_id], env)
-            if result.returncode != 0:
+            ok, result, _ = run_stage(
+                report,
+                "tweet-details",
+                base + ["tweet-details", tweet_id],
+                env,
+                lambda stdout: {"hasOutput": bool(stdout.strip())},
+            )
+            if not ok:
+                report["health"]["afterFailure"] = health_snapshot(base, env)
+                path = write_report(report)
                 print(result.stderr, file=sys.stderr)
-                return result.returncode
-            report["checks"].append({"command": "tweet-details", "ok": bool(result.stdout.strip())})
+                print(f"live acceptance: failed report={path}", file=sys.stderr)
+                return result.returncode or 1
 
-        out_dir = ROOT / ".local" / "live-acceptance"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-        print(f"live acceptance: ok report={out_dir / 'report.json'}")
+        report["health"]["afterSuccess"] = health_snapshot(base, env)
+        report["ok"] = all(stage.get("ok") for stage in report["stages"])
+        path = write_report(report)
+        print(f"live acceptance: ok report={path}")
         return 0
     finally:
         if temp_dir is not None:

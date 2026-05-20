@@ -16,6 +16,8 @@ Cookie import is the recommended setup path for real scraping. Password/email lo
 | Rate-limit smoothing | per-queue account locks |
 | Raw GraphQL pages | yes with `--raw` |
 | Tweet/User/Trend models | typed serde structs |
+| Drift defense | live GraphQL operation-id and xclid diagnostics |
+| Account diagnostics | JSON pool health plus targeted account unlock |
 | CLI | `xscraper` |
 | Performance harness | Criterion parser benchmark |
 
@@ -44,6 +46,15 @@ XSCRAPER_RAISE_WHEN_NO_ACCOUNT=1
 ```
 
 A JSON example is provided at [`config/xscraper.example.json`](config/xscraper.example.json). The current CLI reads flags/env directly; the JSON file is included as a stable deployment template for wrappers and services.
+
+Global CLI flags:
+
+```bash
+xscraper --db ./accounts.db --proxy http://127.0.0.1:7890 --debug search "rust lang:en"
+```
+
+Set `XSCRAPER_RAISE_WHEN_NO_ACCOUNT=1` in automation so empty or fully locked
+pools fail fast instead of waiting.
 
 ## Account Setup
 
@@ -80,7 +91,12 @@ xscraper doctor security
 xscraper doctor imap user@icloud.com
 xscraper doctor xclid --offline
 xscraper doctor xclid
+xscraper doctor drift --live
 ```
+
+`doctor drift --live` fetches the current X frontend bundle and compares the
+repo's GraphQL operation ids against the live bundle. Run it before claiming a
+live scraping release is current.
 
 ## CLI Usage
 
@@ -102,12 +118,16 @@ xscraper user-media 2244994945 --limit 20
 xscraper list-timeline 123456789 --limit 20
 xscraper trends news --limit 20
 xscraper bookmarks --limit 20
+xscraper analyze-account xdevelopers --days 7 --limit 100
+xscraper compare-accounts xdevelopers rustlang --days 7 --limit 100
 ```
 
 Raw GraphQL pages:
 
 ```bash
 xscraper search "rust lang:en" --limit 20 --raw
+xscraper search-user "x developers" --limit 10 --raw
+xscraper search-trend "rust" --limit 20 --raw
 xscraper user-by-login xdevelopers --raw
 ```
 
@@ -158,10 +178,68 @@ Inspect state:
 
 ```bash
 xscraper accounts
+xscraper health
 xscraper stats
 xscraper reset-locks
+xscraper unlock-account my_account
 xscraper delete-inactive
 ```
+
+`health` emits a JSON account-pool report with active/inactive counts, queue
+availability, per-account locked queues, request totals, and last error state.
+Use `unlock-account` for a single account when a failed run leaves one account
+locked but the rest of the pool should remain untouched.
+
+Example health shape:
+
+```json
+{
+  "total": 2,
+  "active": 1,
+  "inactive": 1,
+  "queues": {
+    "SearchTimeline": {
+      "active": 1,
+      "locked": 1,
+      "available": 0
+    }
+  },
+  "accounts": [
+    {
+      "username": "my_account",
+      "logged_in": true,
+      "active": true,
+      "lastUsed": "2026-05-20T00:00:00Z",
+      "totalReq": 12,
+      "lockedQueues": [
+        {
+          "queue": "SearchTimeline",
+          "unlockAt": "2026-05-20T00:15:00Z",
+          "secondsRemaining": 900
+        }
+      ],
+      "errorMsg": null
+    }
+  ]
+}
+```
+
+## GraphQL Operation Maintenance
+
+GraphQL request definitions live in [`src/operations.rs`](src/operations.rs).
+That file is the single source for operation ids, variables, feature overrides,
+field toggles, cursor type, and item-versus-timeline mode. Public API methods
+and raw CLI paths call through that spec so `search`, `search-user`,
+`search-trend`, timeline methods, and diagnostics do not drift apart.
+
+When X changes its frontend contract:
+
+1. Run `xscraper doctor drift --live`.
+2. Update operation ids or request metadata in `src/operations.rs` or
+   `src/gql.rs`.
+3. Run `python3 scripts/release_gate.py --live-drift`.
+4. If live credentials are available, run `scripts/live_acceptance.py` with a
+   real cookie session and inspect `.local/live-acceptance/report.json`.
 
 ## Testing
 
@@ -172,6 +250,8 @@ cargo test --all-targets --all-features
 python3 scripts/security_check.py
 python3 scripts/xclid_drift_check.py
 python3 scripts/live_acceptance.py
+python3 scripts/release_gate.py
+python3 scripts/release_gate.py --live-drift
 ```
 
 The test suite uses synthetic payloads under `tests/support/` so it can run without network credentials or external packages.
@@ -186,6 +266,16 @@ python3 scripts/live_acceptance.py
 ```
 
 Optional live checks are enabled by `XSCRAPER_LIVE_USER_LOGIN`, `XSCRAPER_LIVE_TWEET_ID`, and `XSCRAPER_LIVE_LIMIT`.
+
+`scripts/live_acceptance.py` writes `.local/live-acceptance/report.json` on
+success and failure. The report is structured by stage (`auth`, `search`,
+optional user/tweet probes, parser checks, and account-pool health snapshots),
+so failed live runs leave a diagnostic artifact instead of only stderr output.
+
+CI runs `python3 scripts/release_gate.py`, which covers formatting, clippy,
+all targets and features, the repository security guard, offline xclid drift
+check, and live acceptance harness skip mode. `--live-drift` is intentionally
+manual because it depends on the current external X frontend.
 
 ## Performance
 
@@ -204,6 +294,7 @@ src/account.rs       account model and X request headers
 src/api.rs           public async API and GraphQL operation mapping
 src/cli.rs           command-line interface
 src/gql.rs           operation ids, feature flags, trend ids
+src/operations.rs    canonical GraphQL request specs
 src/models.rs        typed serde models
 src/parser.rs        GraphQL response parser
 src/pool.rs          account pool facade

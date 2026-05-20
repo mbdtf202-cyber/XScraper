@@ -13,6 +13,12 @@ python3 scripts/xclid_drift_check.py
 python3 scripts/live_acceptance.py
 ```
 
+The same offline chain is available as one command:
+
+```bash
+python3 scripts/release_gate.py
+```
+
 `scripts/live_acceptance.py` skips without live credentials. A skip only proves the harness wiring, not live X access.
 
 ## Live Acceptance
@@ -32,8 +38,18 @@ XSCRAPER_LIVE_TWEET_ID=1649191520250245121
 XSCRAPER_LIVE_LIMIT=3
 ```
 
-Reports are written under `.local/live-acceptance/` and ignored by git.
+Reports are written under `.local/live-acceptance/` and ignored by git. The
+report includes staged command results, parser checks, and account-pool health
+snapshots so live failures can be debugged without rerunning blindly.
 
 ## Release
 
-CI runs formatting, clippy, tests, security guard, xclid offline drift check, and live harness skip mode on every push and pull request. Tag pushes matching `v*` build Linux, Intel macOS, Apple Silicon macOS, and Windows archives through `.github/workflows/release.yml`.
+CI runs `python3 scripts/release_gate.py` on every push and pull request. Before
+publishing from a machine with network access, also run:
+
+```bash
+python3 scripts/release_gate.py --live-drift
+```
+
+Tag pushes matching `v*` build Linux, Intel macOS, Apple Silicon macOS, and
+Windows archives through `.github/workflows/release.yml`.
