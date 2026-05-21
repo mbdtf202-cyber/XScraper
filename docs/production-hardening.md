@@ -42,6 +42,20 @@ Reports are written under `.local/live-acceptance/` and ignored by git. The
 report includes staged command results, parser checks, and account-pool health
 snapshots so live failures can be debugged without rerunning blindly.
 
+## X List Coverage
+
+List support is covered in three layers:
+
+1. Offline parser and contract tests cover `ListInfo`, list URL/slug parsing,
+   operation request variables, CLI registration, and `analyze-list`.
+2. `doctor drift --live` checks the current X frontend operation ids for
+   `ListByRestId`, `ListBySlug`, `ListLatestTweetsTimeline`,
+   `ListRankedTweetsTimeline`, `ListMembers`, `ListSubscribers`,
+   `ListOwnerships`, `ListMemberships`, and `CombinedLists`.
+3. Real list reads still require a valid account pool. Before calling a list
+   workflow current, run a live command such as `xscraper list-details
+   https://x.com/i/lists/<id> --raw` with a real cookie-backed account.
+
 ## Release
 
 CI runs `python3 scripts/release_gate.py` on every push and pull request. Before

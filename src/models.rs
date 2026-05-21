@@ -78,6 +78,31 @@ pub struct User {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListInfo {
+    pub id: u64,
+    pub id_str: String,
+    pub url: String,
+    pub name: String,
+    pub description: String,
+    pub slug: Option<String>,
+    pub mode: Option<String>,
+    #[serde(rename = "memberCount")]
+    pub member_count: i64,
+    #[serde(rename = "subscriberCount")]
+    pub subscriber_count: i64,
+    pub following: Option<bool>,
+    #[serde(rename = "isMember")]
+    pub is_member: Option<bool>,
+    pub muting: Option<bool>,
+    pub pinning: Option<bool>,
+    #[serde(rename = "bannerUrl")]
+    pub banner_url: Option<String>,
+    pub owner: Option<User>,
+    #[serde(rename = "_type")]
+    pub object_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tweet {
     pub id: u64,
     pub id_str: String,

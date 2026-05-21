@@ -7,6 +7,7 @@ pub mod drift;
 pub mod error;
 pub mod gql;
 pub mod imap;
+pub mod lists;
 pub mod login;
 pub mod models;
 pub mod operations;
@@ -20,7 +21,7 @@ pub mod xclid;
 pub use account::Account;
 pub use api::{Api, ApiConfig};
 pub use error::{Result, XScraperError};
-pub use models::{Trend, Tweet, User};
+pub use models::{ListInfo, Trend, Tweet, User};
 pub use pool::AccountsPool;
 
 pub fn init_tracing(debug: bool) {

@@ -81,6 +81,31 @@ pub fn parse_trends(value: &Value, limit: i64) -> Vec<Trend> {
     trends
 }
 
+pub fn parse_lists(value: &Value, limit: i64) -> Vec<ListInfo> {
+    let mut list_objects = Vec::new();
+    collect_typed_objects(value, "List", &mut list_objects);
+
+    let mut seen = HashSet::new();
+    let mut lists = Vec::new();
+    for object in list_objects {
+        if limit >= 0 && lists.len() >= limit as usize {
+            break;
+        }
+
+        match parse_list_from_object(object) {
+            Ok(parsed) if seen.insert(parsed.id) => lists.push(parsed),
+            Ok(_) => {}
+            Err(error) => tracing::debug!("skipping list parse error: {error}"),
+        }
+    }
+    lists
+}
+
+pub fn parse_list(value: &Value) -> Option<ListInfo> {
+    let lists = parse_lists(value, -1);
+    (lists.len() == 1).then(|| lists.into_iter().next()).flatten()
+}
+
 fn to_old_response(value: &Value) -> OldResponse {
     let mut response = OldResponse::default();
 
@@ -126,6 +151,88 @@ fn to_old_response(value: &Value) -> OldResponse {
     response
 }
 
+fn parse_list_from_object(object: &Map<String, Value>) -> Result<ListInfo> {
+    let value = Value::Object(object.clone());
+    let id_str = first_string(&value, &["rest_id", "id_str"])?;
+    let id = id_str.parse::<u64>().map_err(|message| XScraperError::Parse {
+        path: "list.id_str".into(),
+        message: format!("{message}"),
+    })?;
+    let owner = value_path(&value, "owner_results.result")
+        .or_else(|| value_path(&value, "user_results.result"))
+        .and_then(|value| parse_user_from_graphql_value(value).ok());
+    let owner_login = owner.as_ref().map(|user| user.username.as_str());
+    let slug = str_path(&value, "slug").map(ToOwned::to_owned);
+
+    Ok(ListInfo {
+        id,
+        id_str: id_str.to_string(),
+        url: list_url(owner_login, slug.as_deref(), id_str),
+        name: first_string(&value, &["name"])?.to_string(),
+        description: str_path(&value, "description").unwrap_or_default().to_string(),
+        slug,
+        mode: first_path(&value, &["mode", "accessibility"])
+            .and_then(Value::as_str)
+            .map(normalize_list_mode),
+        member_count: i64_path(&value, "member_count").unwrap_or_default(),
+        subscriber_count: i64_path(&value, "subscriber_count").unwrap_or_default(),
+        following: bool_path(&value, "following"),
+        is_member: bool_path(&value, "is_member"),
+        muting: bool_path(&value, "muting"),
+        pinning: bool_path(&value, "pinning"),
+        banner_url: list_banner_url(&value),
+        owner,
+        object_type: "xscraper.List".into(),
+    })
+}
+
+fn parse_user_from_graphql_value(value: &Value) -> Result<User> {
+    let object = value.as_object().ok_or_else(|| XScraperError::Parse {
+        path: "list.owner".into(),
+        message: "owner result is not an object".into(),
+    })?;
+    let (_, old) = to_old_user_object(object).ok_or_else(|| XScraperError::Parse {
+        path: "list.owner".into(),
+        message: "owner result missing rest_id or core fields".into(),
+    })?;
+    parse_user_from_old(&old)
+}
+
+fn first_string<'a>(value: &'a Value, paths: &[&str]) -> Result<&'a str> {
+    first_str(value, paths).ok_or_else(|| XScraperError::Parse {
+        path: paths.join("|"),
+        message: "required string is missing".into(),
+    })
+}
+
+fn list_url(owner: Option<&str>, slug: Option<&str>, id_str: &str) -> String {
+    match (owner, slug) {
+        (Some(owner), Some(slug)) => format!("https://x.com/{owner}/lists/{slug}"),
+        _ => format!("https://x.com/i/lists/{id_str}"),
+    }
+}
+
+fn normalize_list_mode(raw: &str) -> String {
+    match raw.to_ascii_lowercase().as_str() {
+        "private" => "Private".into(),
+        "public" => "Public".into(),
+        other => other.to_string(),
+    }
+}
+
+fn list_banner_url(value: &Value) -> Option<String> {
+    first_str(
+        value,
+        &[
+            "custom_banner_media_results.result.media_info.original_img_url",
+            "default_banner_media_results.result.media_info.original_img_url",
+            "custom_banner_media.media_info.original_img_url",
+            "default_banner_media.media_info.original_img_url",
+        ],
+    )
+    .map(ToOwned::to_owned)
+}
+
 fn to_old_object(object: &Map<String, Value>) -> Option<(String, Value)> {
     let rest_id = object.get("rest_id")?.as_str()?.to_string();
     let legacy = object.get("legacy")?.as_object()?;
@@ -133,6 +240,22 @@ fn to_old_object(object: &Map<String, Value>) -> Option<(String, Value)> {
     for (key, value) in legacy {
         merged.insert(key.clone(), value.clone());
     }
+    overlay_current_user_fields(object, &mut merged);
+    merged.insert("id_str".into(), Value::String(rest_id.clone()));
+    if let Ok(id) = rest_id.parse::<u64>() {
+        merged.insert("id".into(), json!(id));
+    }
+    merged.insert("legacy".into(), Value::Null);
+    Some((rest_id, Value::Object(merged)))
+}
+
+fn to_old_user_object(object: &Map<String, Value>) -> Option<(String, Value)> {
+    if let Some(old) = to_old_object(object) {
+        return Some(old);
+    }
+
+    let rest_id = object.get("rest_id")?.as_str()?.to_string();
+    let mut merged = object.clone();
     overlay_current_user_fields(object, &mut merged);
     merged.insert("id_str".into(), Value::String(rest_id.clone()));
     if let Ok(id) = rest_id.parse::<u64>() {
@@ -688,6 +811,10 @@ fn required_value<'a>(value: &'a Value, path: &str) -> Result<&'a Value> {
 fn required_str<'a>(value: &'a Value, path: &str) -> Result<&'a str> {
     str_path(value, path)
         .ok_or_else(|| XScraperError::Parse { path: path.into(), message: "missing string".into() })
+}
+
+fn first_str<'a>(value: &'a Value, paths: &[&str]) -> Option<&'a str> {
+    paths.iter().find_map(|path| str_path(value, path))
 }
 
 #[cfg(test)]

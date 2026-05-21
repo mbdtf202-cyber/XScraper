@@ -1,6 +1,7 @@
 use crate::error::{Result, XScraperError};
 use crate::gql::{default_features, merge_json};
-use crate::models::{Trend, Tweet, User};
+use crate::lists::{ListTarget, normalize_list_target};
+use crate::models::{ListInfo, Trend, Tweet, User};
 pub use crate::operations::OperationRequest;
 use crate::operations::{OperationMode, operation_request};
 use crate::parser;
@@ -314,23 +315,174 @@ impl Api {
         self.gql_items_request(self.request("user_media", &user_id.to_string(), kv)?, limit).await
     }
 
+    pub async fn list_details(
+        &self,
+        list_target: &str,
+        kv: Option<Value>,
+    ) -> Result<Option<ListInfo>> {
+        Ok(self
+            .list_details_raw(list_target, kv)
+            .await?
+            .and_then(|value| parser::parse_list(&value)))
+    }
+
+    pub async fn list_details_raw(
+        &self,
+        list_target: &str,
+        kv: Option<Value>,
+    ) -> Result<Option<Value>> {
+        match normalize_list_target(list_target)? {
+            ListTarget::Id(list_id) => {
+                self.gql_item_request(self.request("list_by_id", &list_id, kv)?).await
+            }
+            ListTarget::Slug { owner, slug } => {
+                self.gql_item_request(self.request(
+                    "list_by_slug",
+                    &format!("{owner}/{slug}"),
+                    kv,
+                )?)
+                .await
+            }
+        }
+    }
+
     pub async fn list_timeline(
         &self,
-        list_id: u64,
+        list_target: &str,
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Tweet>> {
-        let pages = self.list_timeline_raw(list_id, limit, kv).await?;
+        let pages = self.list_timeline_raw(list_target, limit, kv).await?;
         Ok(parse_tweets_from_pages(pages, limit))
     }
 
     pub async fn list_timeline_raw(
         &self,
-        list_id: u64,
+        list_target: &str,
         limit: i64,
         kv: Option<Value>,
     ) -> Result<Vec<Value>> {
-        self.gql_items_request(self.request("list_timeline", &list_id.to_string(), kv)?, limit)
+        let list_id = self.resolve_list_id(list_target).await?;
+        self.gql_items_request(self.request("list_timeline", &list_id, kv)?, limit).await
+    }
+
+    pub async fn list_ranked_timeline(
+        &self,
+        list_target: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Tweet>> {
+        let pages = self.list_ranked_timeline_raw(list_target, limit, kv).await?;
+        Ok(parse_tweets_from_pages(pages, limit))
+    }
+
+    pub async fn list_ranked_timeline_raw(
+        &self,
+        list_target: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        let list_id = self.resolve_list_id(list_target).await?;
+        self.gql_items_request(self.request("list_ranked_timeline", &list_id, kv)?, limit).await
+    }
+
+    pub async fn list_members(
+        &self,
+        list_target: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<User>> {
+        let pages = self.list_members_raw(list_target, limit, kv).await?;
+        Ok(parse_users_from_pages(pages, limit))
+    }
+
+    pub async fn list_members_raw(
+        &self,
+        list_target: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        let list_id = self.resolve_list_id(list_target).await?;
+        self.gql_items_request(self.request("list_members", &list_id, kv)?, limit).await
+    }
+
+    pub async fn list_subscribers(
+        &self,
+        list_target: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<User>> {
+        let pages = self.list_subscribers_raw(list_target, limit, kv).await?;
+        Ok(parse_users_from_pages(pages, limit))
+    }
+
+    pub async fn list_subscribers_raw(
+        &self,
+        list_target: &str,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        let list_id = self.resolve_list_id(list_target).await?;
+        self.gql_items_request(self.request("list_subscribers", &list_id, kv)?, limit).await
+    }
+
+    pub async fn list_ownerships(
+        &self,
+        user_id: u64,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<ListInfo>> {
+        let pages = self.list_ownerships_raw(user_id, limit, kv).await?;
+        Ok(parse_lists_from_pages(pages, limit))
+    }
+
+    pub async fn list_ownerships_raw(
+        &self,
+        user_id: u64,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        self.gql_items_request(self.request("list_ownerships", &user_id.to_string(), kv)?, limit)
+            .await
+    }
+
+    pub async fn list_memberships(
+        &self,
+        user_id: u64,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<ListInfo>> {
+        let pages = self.list_memberships_raw(user_id, limit, kv).await?;
+        Ok(parse_lists_from_pages(pages, limit))
+    }
+
+    pub async fn list_memberships_raw(
+        &self,
+        user_id: u64,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        self.gql_items_request(self.request("list_memberships", &user_id.to_string(), kv)?, limit)
+            .await
+    }
+
+    pub async fn combined_lists(
+        &self,
+        user_id: u64,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<ListInfo>> {
+        let pages = self.combined_lists_raw(user_id, limit, kv).await?;
+        Ok(parse_lists_from_pages(pages, limit))
+    }
+
+    pub async fn combined_lists_raw(
+        &self,
+        user_id: u64,
+        limit: i64,
+        kv: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        self.gql_items_request(self.request("combined_lists", &user_id.to_string(), kv)?, limit)
             .await
     }
 
@@ -479,6 +631,17 @@ impl Api {
             .with_proxy(self.config.proxy.clone())
             .with_base_url(self.config.base_url.clone())
     }
+
+    async fn resolve_list_id(&self, list_target: &str) -> Result<String> {
+        match normalize_list_target(list_target)? {
+            ListTarget::Id(id) => Ok(id),
+            ListTarget::Slug { .. } => self
+                .list_details(list_target, None)
+                .await?
+                .map(|list| list.id_str)
+                .ok_or_else(|| XScraperError::Config(format!("list not found: {list_target}"))),
+        }
+    }
 }
 
 fn gql_body(variables: Value, features: Option<Value>, field_toggles: Option<Value>) -> Value {
@@ -543,4 +706,16 @@ fn parse_tweets_from_pages(pages: Vec<Value>, limit: i64) -> Vec<Tweet> {
         }
     }
     tweets
+}
+
+fn parse_lists_from_pages(pages: Vec<Value>, limit: i64) -> Vec<ListInfo> {
+    let mut lists = Vec::new();
+    for page in pages {
+        lists.extend(parser::parse_lists(&page, limit));
+        if limit >= 0 && lists.len() >= limit as usize {
+            lists.truncate(limit as usize);
+            break;
+        }
+    }
+    lists
 }

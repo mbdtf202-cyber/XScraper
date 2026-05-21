@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use xscraper::analysis::{AnalysisWindow, analyze_tweets, normalize_login};
+use xscraper::analysis::{AnalysisWindow, analyze_list_tweets, analyze_tweets, normalize_login};
+use xscraper::lists::normalize_list_target;
 use xscraper::models::{Media, Tweet};
 
 #[test]
@@ -7,6 +8,17 @@ fn normalize_login_accepts_urls_and_handles() {
     assert_eq!(normalize_login("https://x.com/0xSunNFT"), "0xSunNFT");
     assert_eq!(normalize_login("https://twitter.com/gemfindercalls/"), "gemfindercalls");
     assert_eq!(normalize_login("@user"), "user");
+}
+
+#[test]
+fn normalize_list_target_accepts_ids_urls_and_slugs() {
+    assert_eq!(normalize_list_target("123456").unwrap().id().unwrap(), "123456");
+    assert_eq!(
+        normalize_list_target("https://x.com/i/lists/123456").unwrap().id().unwrap(),
+        "123456"
+    );
+    let slug = normalize_list_target("https://x.com/xdev/lists/rust-team").unwrap();
+    assert_eq!(slug.owner_and_slug().unwrap(), ("xdev", "rust-team"));
 }
 
 #[test]
@@ -34,6 +46,29 @@ fn analyze_tweets_summarizes_engagement_terms_and_latest() {
     assert_eq!(report.hashtags[0].term, "#LABUSDT");
     assert_eq!(report.top_engagement[0].id, "1");
     assert_eq!(report.latest[0].id, "1");
+}
+
+#[test]
+fn analyze_list_tweets_keeps_list_identity_and_reuses_tweet_metrics() {
+    let first = tweet(1, "2026-05-17T00:00:00Z", "Trading $LAB signal #LABUSDT", 10);
+    let second = tweet(2, "2026-05-16T00:00:00Z", "Trading risk framework", 3);
+
+    let report = analyze_list_tweets(
+        "123456".into(),
+        None,
+        AnalysisWindow {
+            days: 7,
+            since: "2026-05-11".into(),
+            until: "2026-05-19".into(),
+            time_zone: "UTC".into(),
+        },
+        vec![first, second],
+    );
+
+    assert_eq!(report.list, "123456");
+    assert_eq!(report.tweet_count, 2);
+    assert_eq!(report.engagement_sum, 19);
+    assert_eq!(report.top_engagement[0].id, "1");
 }
 
 fn tweet(id: u64, date: &str, text: &str, likes: i64) -> Tweet {

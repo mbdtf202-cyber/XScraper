@@ -77,12 +77,28 @@ pub enum Command {
     UserTweetsAndReplies(LimitedUserArgs),
     #[command(alias = "user_media")]
     UserMedia(LimitedUserArgs),
+    #[command(alias = "list_details")]
+    ListDetails(ListDetailsArgs),
     #[command(alias = "list_timeline")]
     ListTimeline(ListArgs),
+    #[command(alias = "list_ranked_timeline")]
+    ListRankedTimeline(ListArgs),
+    #[command(alias = "list_members")]
+    ListMembers(ListArgs),
+    #[command(alias = "list_subscribers")]
+    ListSubscribers(ListArgs),
+    #[command(alias = "list_ownerships")]
+    ListOwnerships(LimitedUserArgs),
+    #[command(alias = "list_memberships")]
+    ListMemberships(LimitedUserArgs),
+    #[command(alias = "combined_lists")]
+    CombinedLists(LimitedUserArgs),
     Trends(TrendArgs),
     Bookmarks(LimitOnlyArgs),
     #[command(alias = "analyze_account")]
     AnalyzeAccount(AnalyzeAccountArgs),
+    #[command(alias = "analyze_list")]
+    AnalyzeList(AnalyzeListArgs),
     #[command(alias = "compare_accounts")]
     CompareAccounts(CompareAccountsArgs),
     Doctor(DoctorArgs),
@@ -182,9 +198,16 @@ pub struct LimitedUserArgs {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    pub list_id: u64,
+    pub list: String,
     #[arg(long, default_value_t = -1)]
     pub limit: i64,
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ListDetailsArgs {
+    pub list: String,
     #[arg(long)]
     pub raw: bool,
 }
@@ -209,6 +232,15 @@ pub struct LimitOnlyArgs {
 #[derive(Debug, Args)]
 pub struct AnalyzeAccountArgs {
     pub account: String,
+    #[arg(long, default_value_t = 7)]
+    pub days: i64,
+    #[arg(long, default_value_t = 100)]
+    pub limit: i64,
+}
+
+#[derive(Debug, Args)]
+pub struct AnalyzeListArgs {
+    pub list: String,
     #[arg(long, default_value_t = 7)]
     pub days: i64,
     #[arg(long, default_value_t = 100)]
@@ -268,6 +300,7 @@ pub struct ParseFixtureArgs {
 pub enum FixtureKind {
     Tweets,
     Users,
+    Lists,
     Trends,
 }
 
@@ -429,11 +462,51 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::UserMedia(args) => {
             print_items(api.user_media(args.user_id, args.limit, None).await?)?
         }
+        Command::ListDetails(args) if args.raw => {
+            print_optional(api.list_details_raw(&args.list, None).await?)?
+        }
+        Command::ListDetails(args) => print_optional(api.list_details(&args.list, None).await?)?,
         Command::ListTimeline(args) if args.raw => {
-            print_pages(api.list_timeline_raw(args.list_id, args.limit, None).await?)?
+            print_pages(api.list_timeline_raw(&args.list, args.limit, None).await?)?
         }
         Command::ListTimeline(args) => {
-            print_items(api.list_timeline(args.list_id, args.limit, None).await?)?
+            print_items(api.list_timeline(&args.list, args.limit, None).await?)?
+        }
+        Command::ListRankedTimeline(args) if args.raw => {
+            print_pages(api.list_ranked_timeline_raw(&args.list, args.limit, None).await?)?
+        }
+        Command::ListRankedTimeline(args) => {
+            print_items(api.list_ranked_timeline(&args.list, args.limit, None).await?)?
+        }
+        Command::ListMembers(args) if args.raw => {
+            print_pages(api.list_members_raw(&args.list, args.limit, None).await?)?
+        }
+        Command::ListMembers(args) => {
+            print_items(api.list_members(&args.list, args.limit, None).await?)?
+        }
+        Command::ListSubscribers(args) if args.raw => {
+            print_pages(api.list_subscribers_raw(&args.list, args.limit, None).await?)?
+        }
+        Command::ListSubscribers(args) => {
+            print_items(api.list_subscribers(&args.list, args.limit, None).await?)?
+        }
+        Command::ListOwnerships(args) if args.raw => {
+            print_pages(api.list_ownerships_raw(args.user_id, args.limit, None).await?)?
+        }
+        Command::ListOwnerships(args) => {
+            print_items(api.list_ownerships(args.user_id, args.limit, None).await?)?
+        }
+        Command::ListMemberships(args) if args.raw => {
+            print_pages(api.list_memberships_raw(args.user_id, args.limit, None).await?)?
+        }
+        Command::ListMemberships(args) => {
+            print_items(api.list_memberships(args.user_id, args.limit, None).await?)?
+        }
+        Command::CombinedLists(args) if args.raw => {
+            print_pages(api.combined_lists_raw(args.user_id, args.limit, None).await?)?
+        }
+        Command::CombinedLists(args) => {
+            print_items(api.combined_lists(args.user_id, args.limit, None).await?)?
         }
         Command::Trends(args) if args.raw => {
             print_pages(api.trends_raw(&args.trend_id, args.limit, None).await?)?
@@ -445,6 +518,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Bookmarks(args) => print_items(api.bookmarks(args.limit, None).await?)?,
         Command::AnalyzeAccount(args) => print_json(
             &crate::analysis::analyze_account(&api, &args.account, args.days, args.limit).await?,
+        )?,
+        Command::AnalyzeList(args) => print_json(
+            &crate::analysis::analyze_list(&api, &args.list, args.days, args.limit).await?,
         )?,
         Command::CompareAccounts(args) => {
             if args.accounts.is_empty() {
@@ -467,6 +543,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     print_items(crate::parser::parse_tweets(&value, args.limit))?
                 }
                 FixtureKind::Users => print_items(crate::parser::parse_users(&value, args.limit))?,
+                FixtureKind::Lists => print_items(crate::parser::parse_lists(&value, args.limit))?,
                 FixtureKind::Trends => {
                     print_items(crate::parser::parse_trends(&value, args.limit))?
                 }

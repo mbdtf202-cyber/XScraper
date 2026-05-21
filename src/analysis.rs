@@ -1,6 +1,6 @@
 use crate::api::Api;
 use crate::error::Result;
-use crate::models::{Tweet, User};
+use crate::models::{ListInfo, Tweet, User};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -48,6 +48,44 @@ pub struct AccountAnalysisReport {
 pub struct AccountComparisonReport {
     pub window: AnalysisWindow,
     pub accounts: Vec<AccountAnalysisReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListAnalysisReport {
+    pub list: String,
+    pub info: Option<ListInfo>,
+    pub window: AnalysisWindow,
+    #[serde(rename = "fetchedCount")]
+    pub fetched_count: usize,
+    #[serde(rename = "tweetCount")]
+    pub tweet_count: usize,
+    pub originals: usize,
+    pub replies: usize,
+    pub retweets: usize,
+    pub quotes: usize,
+    #[serde(rename = "byDay")]
+    pub by_day: BTreeMap<String, usize>,
+    #[serde(rename = "engagementSum")]
+    pub engagement_sum: i64,
+    #[serde(rename = "avgEngagement")]
+    pub avg_engagement: f64,
+    #[serde(rename = "medianEngagement")]
+    pub median_engagement: i64,
+    #[serde(rename = "viewsSum")]
+    pub views_sum: i64,
+    #[serde(rename = "avgViews")]
+    pub avg_views: f64,
+    #[serde(rename = "topWords")]
+    pub top_words: Vec<CountedTerm>,
+    pub cashtags: Vec<CountedTerm>,
+    pub hashtags: Vec<CountedTerm>,
+    #[serde(rename = "linkDomains")]
+    pub link_domains: Vec<CountedTerm>,
+    #[serde(rename = "contractLikeCount")]
+    pub contract_like_count: usize,
+    pub latest: Vec<TweetExcerpt>,
+    #[serde(rename = "topEngagement")]
+    pub top_engagement: Vec<TweetExcerpt>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,12 +145,108 @@ pub async fn compare_accounts(
     Ok(AccountComparisonReport { window, accounts })
 }
 
+pub async fn analyze_list(
+    api: &Api,
+    list_target: &str,
+    days: i64,
+    limit: i64,
+) -> Result<ListAnalysisReport> {
+    let window = analysis_window(days);
+    let info = api.list_details(list_target, None).await?;
+    let tweets = api.list_timeline(list_target, limit, None).await?;
+    Ok(analyze_list_tweets(list_target.to_string(), info, window, tweets))
+}
+
 pub fn analyze_tweets(
     login: String,
     user: Option<User>,
     window: AnalysisWindow,
     tweets: Vec<Tweet>,
 ) -> AccountAnalysisReport {
+    let report = analyze_tweet_metrics(window, tweets);
+    AccountAnalysisReport {
+        login,
+        user,
+        window: report.window,
+        fetched_count: report.fetched_count,
+        tweet_count: report.tweet_count,
+        originals: report.originals,
+        replies: report.replies,
+        retweets: report.retweets,
+        quotes: report.quotes,
+        by_day: report.by_day,
+        engagement_sum: report.engagement_sum,
+        avg_engagement: report.avg_engagement,
+        median_engagement: report.median_engagement,
+        views_sum: report.views_sum,
+        avg_views: report.avg_views,
+        top_words: report.top_words,
+        cashtags: report.cashtags,
+        hashtags: report.hashtags,
+        link_domains: report.link_domains,
+        contract_like_count: report.contract_like_count,
+        latest: report.latest,
+        top_engagement: report.top_engagement,
+    }
+}
+
+pub fn analyze_list_tweets(
+    list: String,
+    info: Option<ListInfo>,
+    window: AnalysisWindow,
+    tweets: Vec<Tweet>,
+) -> ListAnalysisReport {
+    let report = analyze_tweet_metrics(window, tweets);
+    ListAnalysisReport {
+        list,
+        info,
+        window: report.window,
+        fetched_count: report.fetched_count,
+        tweet_count: report.tweet_count,
+        originals: report.originals,
+        replies: report.replies,
+        retweets: report.retweets,
+        quotes: report.quotes,
+        by_day: report.by_day,
+        engagement_sum: report.engagement_sum,
+        avg_engagement: report.avg_engagement,
+        median_engagement: report.median_engagement,
+        views_sum: report.views_sum,
+        avg_views: report.avg_views,
+        top_words: report.top_words,
+        cashtags: report.cashtags,
+        hashtags: report.hashtags,
+        link_domains: report.link_domains,
+        contract_like_count: report.contract_like_count,
+        latest: report.latest,
+        top_engagement: report.top_engagement,
+    }
+}
+
+struct TweetMetricReport {
+    window: AnalysisWindow,
+    fetched_count: usize,
+    tweet_count: usize,
+    originals: usize,
+    replies: usize,
+    retweets: usize,
+    quotes: usize,
+    by_day: BTreeMap<String, usize>,
+    engagement_sum: i64,
+    avg_engagement: f64,
+    median_engagement: i64,
+    views_sum: i64,
+    avg_views: f64,
+    top_words: Vec<CountedTerm>,
+    cashtags: Vec<CountedTerm>,
+    hashtags: Vec<CountedTerm>,
+    link_domains: Vec<CountedTerm>,
+    contract_like_count: usize,
+    latest: Vec<TweetExcerpt>,
+    top_engagement: Vec<TweetExcerpt>,
+}
+
+fn analyze_tweet_metrics(window: AnalysisWindow, tweets: Vec<Tweet>) -> TweetMetricReport {
     let fetched_count = tweets.len();
     let tweets = dedupe_tweets(tweets);
     let mut by_day = BTreeMap::new();
@@ -157,9 +291,7 @@ pub fn analyze_tweets(
     let mut top_engagement = tweets.clone();
     top_engagement.sort_by_key(|tweet| std::cmp::Reverse(engagement(tweet)));
 
-    AccountAnalysisReport {
-        login,
-        user,
+    TweetMetricReport {
         window,
         fetched_count,
         tweet_count,

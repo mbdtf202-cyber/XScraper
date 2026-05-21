@@ -162,6 +162,44 @@ pub fn trend_payload() -> Value {
     })
 }
 
+pub fn list_payload() -> Value {
+    json!({
+        "data": {
+            "list": list_result()
+        }
+    })
+}
+
+fn list_result() -> Value {
+    json!({
+        "__typename": "List",
+        "id": "TGlzdDo1MDAx",
+        "rest_id": "5001",
+        "id_str": "5001",
+        "name": "Rust Operators",
+        "description": "A focused Rust engineering list",
+        "mode": "public",
+        "accessibility": "public",
+        "slug": "rust-operators",
+        "member_count": 42,
+        "subscriber_count": 7,
+        "following": true,
+        "is_member": false,
+        "muting": false,
+        "pinning": false,
+        "custom_banner_media_results": {
+            "result": {
+                "media_info": {
+                    "original_img_url": "https://example.com/list-banner.jpg"
+                }
+            }
+        },
+        "owner_results": {
+            "result": user_result("1001", "xscraper_dev", "XScraper Dev")
+        }
+    })
+}
+
 fn user_result(id: &str, username: &str, displayname: &str) -> Value {
     json!({
         "__typename": "User",

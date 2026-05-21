@@ -1,4 +1,5 @@
 use crate::gql::*;
+use crate::lists::normalize_list_target;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,9 +181,75 @@ pub fn operation_request(
             None,
             Some(json!({ "withArticlePlainText": false })),
         ),
+        "list_by_id" => OperationRequest {
+            op: OP_LIST_BY_REST_ID,
+            queue: "ListByRestId",
+            variables: merge_json(json!({ "listId": id()?.to_string() }), kv),
+            features: Some(list_detail_features()),
+            field_toggles: Some(list_detail_field_toggles()),
+            cursor_type: "",
+            mode: OperationMode::Item,
+        },
+        "list_by_slug" => {
+            let (screen_name, list_slug) = split_list_slug(id_or_query)?;
+            OperationRequest {
+                op: OP_LIST_BY_SLUG,
+                queue: "ListBySlug",
+                variables: merge_json(
+                    json!({ "screenName": screen_name, "listSlug": list_slug }),
+                    kv,
+                ),
+                features: Some(list_detail_features()),
+                field_toggles: Some(list_detail_field_toggles()),
+                cursor_type: "",
+                mode: OperationMode::Item,
+            }
+        }
         "list_timeline" => timeline_request(
             OP_LIST_LATEST_TWEETS_TIMELINE,
             json!({ "listId": id()?.to_string(), "count": 20 }),
+            kv,
+            None,
+            Some(default_field_toggles()),
+        ),
+        "list_ranked_timeline" => timeline_request(
+            OP_LIST_RANKED_TWEETS_TIMELINE,
+            json!({ "listId": id()?.to_string(), "count": 20 }),
+            kv,
+            None,
+            Some(default_field_toggles()),
+        ),
+        "list_members" => timeline_request(
+            OP_LIST_MEMBERS,
+            json!({ "listId": id()?.to_string(), "count": 20 }),
+            kv,
+            None,
+            Some(default_field_toggles()),
+        ),
+        "list_subscribers" => timeline_request(
+            OP_LIST_SUBSCRIBERS,
+            json!({ "listId": id()?.to_string(), "count": 20 }),
+            kv,
+            None,
+            Some(default_field_toggles()),
+        ),
+        "list_ownerships" => timeline_request(
+            OP_LIST_OWNERSHIPS,
+            list_ownership_variables(id()?),
+            kv,
+            None,
+            Some(default_field_toggles()),
+        ),
+        "list_memberships" => timeline_request(
+            OP_LIST_MEMBERSHIPS,
+            list_user_variables(id()?),
+            kv,
+            None,
+            Some(default_field_toggles()),
+        ),
+        "combined_lists" => timeline_request(
+            OP_COMBINED_LISTS,
+            list_user_variables(id()?),
             kv,
             None,
             Some(default_field_toggles()),
@@ -275,6 +342,42 @@ fn tweet_detail_variables(tweet_id: String, kv: Option<Value>) -> Value {
 
 fn user_list_variables(user_id: u64) -> Value {
     json!({ "userId": user_id.to_string(), "count": 20, "includePromotedContent": false })
+}
+
+fn list_ownership_variables(user_id: u64) -> Value {
+    json!({
+        "userId": user_id.to_string(),
+        "isListMemberTargetUserId": user_id.to_string(),
+        "count": 20
+    })
+}
+
+fn list_user_variables(user_id: u64) -> Value {
+    json!({ "userId": user_id.to_string(), "count": 20 })
+}
+
+fn split_list_slug(value: &str) -> Option<(String, String)> {
+    let target = normalize_list_target(value).ok()?;
+    let (owner, slug) = target.owner_and_slug()?;
+    Some((owner.to_string(), slug.to_string()))
+}
+
+fn list_detail_features() -> Value {
+    json!({
+        "profile_label_improvements_pcf_label_in_post_enabled": true,
+        "responsive_web_profile_redirect_enabled": false,
+        "rweb_tipjar_consumption_enabled": false,
+        "verified_phone_label_enabled": false,
+        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": false,
+        "responsive_web_graphql_timeline_navigation_enabled": true
+    })
+}
+
+fn list_detail_field_toggles() -> Value {
+    json!({
+        "withPayments": false,
+        "withAuxiliaryUserLabels": false
+    })
 }
 
 fn default_field_toggles() -> Value {

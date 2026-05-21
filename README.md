@@ -15,7 +15,8 @@ Cookie import is the recommended setup path for real scraping. Password/email lo
 | Password/email login | yes |
 | Rate-limit smoothing | per-queue account locks |
 | Raw GraphQL pages | yes with `--raw` |
-| Tweet/User/Trend models | typed serde structs |
+| Tweet/User/Trend/List models | typed serde structs |
+| X Lists | details, latest/ranked timeline, members, subscribers, user list relations, and list analysis |
 | Drift defense | live GraphQL operation-id and xclid diagnostics |
 | Account diagnostics | JSON pool health plus targeted account unlock |
 | CLI | `xscraper` |
@@ -115,12 +116,26 @@ xscraper subscriptions 2244994945 --limit 20
 xscraper user-tweets 2244994945 --limit 20
 xscraper user-tweets-and-replies 2244994945 --limit 20
 xscraper user-media 2244994945 --limit 20
+xscraper list-details 123456789
 xscraper list-timeline 123456789 --limit 20
+xscraper list-ranked-timeline 123456789 --limit 20
+xscraper list-members 123456789 --limit 20
+xscraper list-subscribers 123456789 --limit 20
+xscraper list-ownerships 2244994945 --limit 20
+xscraper list-memberships 2244994945 --limit 20
+xscraper combined-lists 2244994945 --limit 20
 xscraper trends news --limit 20
 xscraper bookmarks --limit 20
 xscraper analyze-account xdevelopers --days 7 --limit 100
+xscraper analyze-list 123456789 --days 7 --limit 100
 xscraper compare-accounts xdevelopers rustlang --days 7 --limit 100
 ```
+
+List commands accept the numeric list id and X/Twitter list URLs such as
+`https://x.com/i/lists/123456789`. `list-details` also accepts slug URLs such
+as `https://x.com/xdevelopers/lists/rust-team`; timeline, member, and
+subscriber commands resolve slug targets through `list-details` before fetching
+the timeline that requires a numeric `listId`.
 
 Raw GraphQL pages:
 
@@ -129,6 +144,8 @@ xscraper search "rust lang:en" --limit 20 --raw
 xscraper search-user "x developers" --limit 10 --raw
 xscraper search-trend "rust" --limit 20 --raw
 xscraper user-by-login xdevelopers --raw
+xscraper list-details https://x.com/i/lists/123456789 --raw
+xscraper list-members https://x.com/i/lists/123456789 --limit 20 --raw
 ```
 
 Offline parser verification against a JSON payload:
@@ -136,6 +153,7 @@ Offline parser verification against a JSON payload:
 ```bash
 xscraper parse-fixture ./payload.json tweets --limit 20
 xscraper parse-fixture ./payload.json users
+xscraper parse-fixture ./payload.json lists
 xscraper parse-fixture ./payload.json trends --limit 20
 ```
 
@@ -166,7 +184,7 @@ async fn main() -> Result<()> {
 
 ## Rate Limit Behavior
 
-Each GraphQL operation is treated as a queue, such as `SearchTimeline`, `UserTweets`, or `TweetDetail`.
+Each GraphQL operation is treated as a queue, such as `SearchTimeline`, `UserTweets`, `TweetDetail`, or `ListMembers`.
 
 1. XScraper locks an active account for the queue before a request.
 2. Successful requests unlock the account and increment per-queue stats.
@@ -230,7 +248,8 @@ GraphQL request definitions live in [`src/operations.rs`](src/operations.rs).
 That file is the single source for operation ids, variables, feature overrides,
 field toggles, cursor type, and item-versus-timeline mode. Public API methods
 and raw CLI paths call through that spec so `search`, `search-user`,
-`search-trend`, timeline methods, and diagnostics do not drift apart.
+`search-trend`, list methods, timeline methods, and diagnostics do not drift
+apart.
 
 When X changes its frontend contract:
 
@@ -294,6 +313,7 @@ src/account.rs       account model and X request headers
 src/api.rs           public async API and GraphQL operation mapping
 src/cli.rs           command-line interface
 src/gql.rs           operation ids, feature flags, trend ids
+src/lists.rs         X List target parsing for ids and URLs
 src/operations.rs    canonical GraphQL request specs
 src/models.rs        typed serde models
 src/parser.rs        GraphQL response parser

@@ -1,13 +1,14 @@
 use serde_json::Value;
-use xscraper::models::{Card, Tweet, User, UserRef};
-use xscraper::parser::{parse_trends, parse_tweet, parse_tweets, parse_users};
+use xscraper::models::{Card, ListInfo, Tweet, User, UserRef};
+use xscraper::parser::{parse_lists, parse_trends, parse_tweet, parse_tweets, parse_users};
 
 mod support {
     pub mod sample_payloads;
 }
 
 use support::sample_payloads::{
-    current_search_payload, search_payload, trend_payload, tweet_payload, user_payload,
+    current_search_payload, list_payload, search_payload, trend_payload, tweet_payload,
+    user_payload,
 };
 
 fn check_user_ref(user: &UserRef) {
@@ -26,6 +27,16 @@ fn check_user(user: &User) {
 
     let json = serde_json::to_string(user).unwrap();
     assert!(json.contains(&user.id_str));
+}
+
+fn check_list(list: &ListInfo) {
+    assert_eq!(list.id.to_string(), list.id_str);
+    assert!(!list.name.is_empty());
+    assert!(list.url.starts_with("https://x.com/"));
+    assert_eq!(list.object_type, "xscraper.List");
+
+    let json = serde_json::to_string(list).unwrap();
+    assert!(json.contains(&list.id_str));
 }
 
 fn check_tweet(tweet: &Tweet) {
@@ -94,6 +105,19 @@ fn parses_users_by_id_and_login_shape() {
 }
 
 #[test]
+fn parses_list_details_shape() {
+    let list = parse_lists(&list_payload(), -1).pop().unwrap();
+
+    assert_eq!(list.id, 5001);
+    assert_eq!(list.name, "Rust Operators");
+    assert_eq!(list.slug.as_deref(), Some("rust-operators"));
+    assert_eq!(list.member_count, 42);
+    assert_eq!(list.subscriber_count, 7);
+    assert_eq!(list.owner.as_ref().unwrap().username, "xscraper_dev");
+    check_list(&list);
+}
+
+#[test]
 fn parses_tweet_details() {
     let tweet = parse_tweet(&tweet_payload(), 2001).unwrap();
     assert_eq!(tweet.id, 2001);
@@ -129,4 +153,5 @@ fn parses_summary_card() {
 fn parse_fixture_command_inputs_are_json_values() {
     let value: Value = search_payload();
     assert!(value.pointer("/data/search_by_raw_query").is_some());
+    assert!(!parse_lists(&list_payload(), -1).is_empty());
 }

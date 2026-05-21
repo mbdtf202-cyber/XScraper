@@ -35,6 +35,11 @@ fn gql_params_allow_kv_count_override_for_generator_methods() {
         ("user_tweets_and_replies", "123"),
         ("user_media", "123"),
         ("list_timeline", "123"),
+        ("list_members", "123"),
+        ("list_subscribers", "123"),
+        ("list_ownerships", "123"),
+        ("list_memberships", "123"),
+        ("combined_lists", "123"),
         ("trends", "sport"),
         ("bookmarks", ""),
     ] {
@@ -55,6 +60,32 @@ fn operation_request_accepts_hyphenated_cli_names() {
 
     assert_eq!(request.queue, "BlueVerifiedFollowers");
     assert_eq!(request.variables["count"], 7);
+}
+
+#[test]
+fn list_operation_requests_use_current_graphql_shapes() {
+    let dir = tempdir().unwrap();
+    let api = Api::new(AccountsPool::new(dir.path().join("test.db")));
+
+    let by_id = api.operation_request("list-by-id", "123", None).unwrap();
+    assert_eq!(by_id.queue, "ListByRestId");
+    assert_eq!(by_id.variables["listId"], "123");
+
+    let by_slug = api.operation_request("list-by-slug", "xdev/rust-team", None).unwrap();
+    assert_eq!(by_slug.queue, "ListBySlug");
+    assert_eq!(by_slug.variables["screenName"], "xdev");
+    assert_eq!(by_slug.variables["listSlug"], "rust-team");
+
+    let members =
+        api.operation_request("list-members", "123", Some(json!({ "count": 7 }))).unwrap();
+    assert_eq!(members.queue, "ListMembers");
+    assert_eq!(members.variables["listId"], "123");
+    assert_eq!(members.variables["count"], 7);
+
+    let ownerships = api.operation_request("list-ownerships", "456", None).unwrap();
+    assert_eq!(ownerships.queue, "ListOwnerships");
+    assert_eq!(ownerships.variables["userId"], "456");
+    assert_eq!(ownerships.variables["isListMemberTargetUserId"], "456");
 }
 
 #[test]
