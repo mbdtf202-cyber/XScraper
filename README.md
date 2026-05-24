@@ -17,8 +17,10 @@ Cookie import is the recommended setup path for real scraping. Password/email lo
 | Raw GraphQL pages | yes with `--raw` |
 | Tweet/User/Trend/List models | typed serde structs |
 | X Lists | details, latest/ranked timeline, members, subscribers, user list relations, and list analysis |
-| Drift defense | live GraphQL operation-id and xclid diagnostics |
-| Account diagnostics | JSON pool health plus targeted account unlock |
+| Drift defense | live bundle drift, browser XHR drift probe, and xclid asset diagnostics |
+| Account diagnostics | JSON health scores, rate-limit/auth event counts, proxy scoring, and targeted account unlock |
+| Evidence | redacted raw-response artifacts for live failures and fixture candidates |
+| Batch collection | SQLite checkpoint store for dedupe, cursor resume, and long job recovery |
 | CLI | `xscraper` |
 | Performance harness | Criterion parser benchmark |
 
@@ -91,13 +93,36 @@ Diagnostics:
 xscraper doctor security
 xscraper doctor imap user@icloud.com
 xscraper doctor xclid --offline
+xscraper doctor xclid --offline --json
 xscraper doctor xclid
 xscraper doctor drift --live
+xscraper doctor browser-drift --events ./cdp-events.json --operation search --target "rust"
+xscraper --db .local/live-acceptance/live-debug.db doctor browser-drift --live --account x_live_account --operation search --target "rust"
+xscraper doctor report --json
 ```
 
 `doctor drift --live` fetches the current X frontend bundle and compares the
 repo's GraphQL operation ids against the live bundle. Run it before claiming a
 live scraping release is current.
+
+`doctor browser-drift` is the browser drift probe entrypoint. Feed it captured
+Chrome/CDP `Network.requestWillBeSent` events or run it with `--live` to launch
+or connect to Chrome/CDP. It compares the real
+`/i/api/graphql/{queryId}/{operationName}` XHR variables, features, and field
+toggles against the local `src/operations.rs` request spec.
+
+Live browser drift needs a Chrome context that can actually load X search
+results. The simplest path is `--account <username>`, which injects that
+account's SQLite cookies into the temporary CDP browser. You can also use
+`--cdp-url http://127.0.0.1:9222` for a Chrome instance you started with remote
+debugging and a logged-in profile, or pass `--user-data-dir` for a dedicated
+logged-in profile. A fresh temporary Chrome profile without injected cookies may
+hit the login wall and produce a diagnostic `missingLocal` report because no
+GraphQL XHR was observed.
+
+`doctor report --json` emits one machine-readable health document covering the
+account pool, queue locks, account health scores, proxy scores, offline xclid
+diagnostics, and optional browser drift evidence via `--browser-events`.
 
 ## CLI Usage
 
@@ -204,9 +229,10 @@ xscraper delete-inactive
 ```
 
 `health` emits a JSON account-pool report with active/inactive counts, queue
-availability, per-account locked queues, request totals, and last error state.
-Use `unlock-account` for a single account when a failed run leaves one account
-locked but the rest of the pool should remain untouched.
+availability, per-account locked queues, request totals, health scores,
+event-count distributions, and proxy health. Use `unlock-account` for a single
+account when a failed run leaves one account locked but the rest of the pool
+should remain untouched.
 
 Example health shape:
 
@@ -227,8 +253,16 @@ Example health shape:
       "username": "my_account",
       "logged_in": true,
       "active": true,
+      "healthScore": 70,
       "lastUsed": "2026-05-20T00:00:00Z",
       "totalReq": 12,
+      "eventCounts": {
+        "rate_limited": 1,
+        "success": 12
+      },
+      "reasons": [
+        "rate limit events: 1"
+      ],
       "lockedQueues": [
         {
           "queue": "SearchTimeline",
@@ -238,9 +272,46 @@ Example health shape:
       ],
       "errorMsg": null
     }
+  ],
+  "proxies": [
+    {
+      "proxy": "http://proxy-a:8080",
+      "score": 100,
+      "successes": 12,
+      "failures": 0,
+      "eventCounts": {
+        "success": 12
+      },
+      "reasons": []
+    }
   ]
 }
 ```
+
+## Evidence and Fixtures
+
+Live failures should leave replayable evidence, not just terminal text.
+`scripts/live_acceptance.py` writes `.local/live-acceptance/report.json` on
+success and failure, and stores redacted stage evidence under
+`.local/live-acceptance/evidence/` when a command fails or emits stderr.
+
+The Rust evidence layer in `src/evidence.rs` can persist redacted JSON/text
+payloads with a manifest. Use it for raw GraphQL responses, headers, operation
+metadata, account identity, X error codes, and parser fixture candidates. The
+redactor removes cookies, auth headers, proxy credentials, and common token
+fields before anything is written.
+
+## Batch Jobs and Checkpointing
+
+`src/jobs.rs` provides the long-run collection primitive:
+
+- one SQLite job database per batch run;
+- deterministic fingerprints to dedupe identical operation/target/cursor items;
+- per-operation checkpoints with cursor and last seen id;
+- pending-item resume for keyword, account, or list batches.
+
+This is intentionally scoped to X GraphQL operation work. It is not a generic
+web crawler framework.
 
 ## GraphQL Operation Maintenance
 
@@ -254,10 +325,11 @@ apart.
 When X changes its frontend contract:
 
 1. Run `xscraper doctor drift --live`.
-2. Update operation ids or request metadata in `src/operations.rs` or
+2. Capture real browser/CDP XHRs and run `xscraper doctor browser-drift --events ./cdp-events.json`.
+3. Update operation ids or request metadata in `src/operations.rs` or
    `src/gql.rs`.
-3. Run `python3 scripts/release_gate.py --live-drift`.
-4. If live credentials are available, run `scripts/live_acceptance.py` with a
+4. Run `python3 scripts/release_gate.py --json --live-drift`.
+5. If live credentials are available, run `scripts/live_acceptance.py` with a
    real cookie session and inspect `.local/live-acceptance/report.json`.
 
 ## Testing
@@ -270,6 +342,7 @@ python3 scripts/security_check.py
 python3 scripts/xclid_drift_check.py
 python3 scripts/live_acceptance.py
 python3 scripts/release_gate.py
+python3 scripts/release_gate.py --json
 python3 scripts/release_gate.py --live-drift
 ```
 
@@ -296,6 +369,10 @@ all targets and features, the repository security guard, offline xclid drift
 check, and live acceptance harness skip mode. `--live-drift` is intentionally
 manual because it depends on the current external X frontend.
 
+`python3 scripts/release_gate.py --json` also writes
+`.local/release-gate/report.json` with step names, commands, return codes, and
+the final gate result.
+
 ## Performance
 
 Parser benchmark:
@@ -311,8 +388,13 @@ Live scraping is normally dominated by account rate limits, proxy quality, and X
 ```text
 src/account.rs       account model and X request headers
 src/api.rs           public async API and GraphQL operation mapping
+src/browser_probe.rs CDP/XHR GraphQL drift parser
 src/cli.rs           command-line interface
+src/diagnostics.rs   unified machine-readable doctor reports
+src/evidence.rs      redacted raw-response evidence manifests
+src/fetch_profile.rs scoped timeout/proxy/header/request-id profile
 src/gql.rs           operation ids, feature flags, trend ids
+src/jobs.rs          batch job dedupe and checkpoint storage
 src/lists.rs         X List target parsing for ids and URLs
 src/operations.rs    canonical GraphQL request specs
 src/models.rs        typed serde models

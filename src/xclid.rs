@@ -4,12 +4,28 @@ use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
 use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const CLIENT_WEB_BASE: &str = "https://abs.twimg.com/responsive-web/client-web";
+
 static INDICES_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(\(\w{1}\[(\d{1,2})\],\s*16\))+").unwrap());
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XclidAssetDiagnostics {
+    pub ok: bool,
+    #[serde(rename = "xclidScript")]
+    pub xclid_script: Option<String>,
+    #[serde(rename = "chunkIds")]
+    pub chunk_ids: Vec<String>,
+    pub markers: Vec<String>,
+    pub failures: Vec<String>,
+    #[serde(rename = "failureStage")]
+    pub failure_stage: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct XClientTransactionIdGenerator {
@@ -131,13 +147,63 @@ fn get_scripts_list(text: &str) -> Result<Vec<String>> {
         .into_iter()
         .map(|(key, hash)| {
             let name = names.get(&key).cloned().unwrap_or(key);
-            format!("https://abs.twimg.com/responsive-web/client-web/{name}.{hash}a.js")
+            format!("{CLIENT_WEB_BASE}/{name}.{hash}a.js")
         })
         .collect::<Vec<_>>();
     if scripts.is_empty() {
         return Err(XScraperError::LoginFlow("xclid scripts marker missing".into()));
     }
     Ok(scripts)
+}
+
+pub fn diagnose_from_html(text: &str) -> XclidAssetDiagnostics {
+    build_asset_diagnostics(text)
+}
+
+pub fn build_asset_diagnostics(text: &str) -> XclidAssetDiagnostics {
+    let mut markers = Vec::new();
+    let mut failures = Vec::new();
+
+    if text.contains("_.u=e=>\"\"+") {
+        markers.push("chunk-name-map".into());
+    } else {
+        failures.push("xclid chunk marker missing: webpack chunk name map marker not found".into());
+    }
+    if text.contains(")[e]+\"a.js\"") {
+        markers.push("chunk-hash-map".into());
+    } else {
+        failures.push("xclid chunk marker missing: webpack chunk hash map marker not found".into());
+    }
+
+    let names = match parse_chunk_map_after(text, "_.u=e=>\"\"+") {
+        Ok(values) => values,
+        Err(error) => {
+            failures.push(format!("chunk name map parse failed: {error}"));
+            BTreeMap::new()
+        }
+    };
+    let hashes = match parse_chunk_map_before(text, ")[e]+\"a.js\"") {
+        Ok(values) => values,
+        Err(error) => {
+            failures.push(format!("chunk hash map parse failed: {error}"));
+            BTreeMap::new()
+        }
+    };
+
+    let chunk_ids = hashes.keys().cloned().collect::<Vec<_>>();
+    let xclid_script = hashes.get("59924").map(|hash| {
+        let name = names.get("59924").map(String::as_str).unwrap_or("59924");
+        format!("{CLIENT_WEB_BASE}/{name}.{hash}a.js")
+    });
+
+    if xclid_script.is_none() && !hashes.is_empty() {
+        failures.push("xclid ondemand chunk 59924 missing from chunk map".into());
+    }
+
+    let failure_stage = if xclid_script.is_none() { Some("chunk-map".into()) } else { None };
+    let ok = failure_stage.is_none();
+
+    XclidAssetDiagnostics { ok, xclid_script, chunk_ids, markers, failures, failure_stage }
 }
 
 fn parse_chunk_map_after(text: &str, start_marker: &str) -> Result<BTreeMap<String, String>> {

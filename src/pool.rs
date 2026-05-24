@@ -1,7 +1,7 @@
 use crate::account::{Account, default_user_agent};
 use crate::error::{Result, XScraperError};
 use crate::login::{LoginConfig, login};
-use crate::storage::{AccountStore, PoolStats};
+use crate::storage::{AccountEvent, AccountEventInput, AccountStore, PoolStats};
 use crate::utils::{now_utc, parse_cookies};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -44,38 +44,55 @@ pub struct LoginSummary {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct PoolHealthReport {
     pub total: usize,
     pub active: usize,
     pub inactive: usize,
     pub queues: BTreeMap<String, QueueHealth>,
     pub accounts: Vec<AccountHealth>,
+    pub proxies: Vec<ProxyHealth>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct QueueHealth {
     pub active: usize,
     pub locked: usize,
     pub available: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AccountHealth {
     pub username: String,
     pub logged_in: bool,
     pub active: bool,
+    #[serde(rename = "healthScore")]
+    pub health_score: i64,
     #[serde(rename = "lastUsed")]
     pub last_used: Option<DateTime<Utc>>,
     #[serde(rename = "totalReq")]
     pub total_req: i64,
+    #[serde(rename = "eventCounts")]
+    pub event_counts: BTreeMap<String, i64>,
+    pub reasons: Vec<String>,
     #[serde(rename = "lockedQueues")]
     pub locked_queues: Vec<QueueLockHealth>,
     #[serde(rename = "errorMsg")]
     pub error_msg: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ProxyHealth {
+    pub proxy: String,
+    pub score: i64,
+    pub successes: i64,
+    pub failures: i64,
+    #[serde(rename = "eventCounts")]
+    pub event_counts: BTreeMap<String, i64>,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct QueueLockHealth {
     pub queue: String,
     #[serde(rename = "unlockAt")]
@@ -260,6 +277,14 @@ impl AccountsPool {
         self.store.mark_inactive(username, message)
     }
 
+    pub fn record_account_event(&self, event: AccountEventInput) -> Result<()> {
+        self.store.record_account_event(event)
+    }
+
+    pub fn account_events(&self) -> Result<Vec<AccountEvent>> {
+        self.store.account_events()
+    }
+
     pub fn stats(&self) -> Result<PoolStats> {
         self.store.stats()
     }
@@ -290,6 +315,7 @@ impl AccountsPool {
 
     pub fn health_report(&self) -> Result<PoolHealthReport> {
         let accounts = self.get_all()?;
+        let events = self.account_events()?;
         let now = now_utc();
         let active = accounts.iter().filter(|account| account.active).count();
         let inactive = accounts.len().saturating_sub(active);
@@ -315,9 +341,21 @@ impl AccountsPool {
             })
             .collect();
 
+        let mut events_by_account = BTreeMap::<String, Vec<AccountEvent>>::new();
+        for event in &events {
+            events_by_account
+                .entry(event.username.to_ascii_lowercase())
+                .or_default()
+                .push(event.clone());
+        }
+
         let mut account_rows = accounts
             .into_iter()
             .map(|account| {
+                let account_events = events_by_account
+                    .get(&account.username.to_ascii_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
                 let mut locked_queues = account
                     .locks
                     .iter()
@@ -329,14 +367,23 @@ impl AccountsPool {
                     })
                     .collect::<Vec<_>>();
                 locked_queues.sort_by(|left, right| left.queue.cmp(&right.queue));
+                let event_counts = event_counts(&account_events);
+                let (health_score, reasons) = account_health_score(
+                    account.active,
+                    &event_counts,
+                    account.error_msg.as_deref(),
+                );
 
                 AccountHealth {
                     username: account.username,
                     logged_in: account.headers.contains_key("authorization")
                         || account.cookies.contains_key("ct0"),
                     active: account.active,
+                    health_score,
                     last_used: account.last_used,
                     total_req: account.stats.values().sum(),
+                    event_counts,
+                    reasons,
                     locked_queues,
                     error_msg: account.error_msg,
                 }
@@ -355,6 +402,7 @@ impl AccountsPool {
             inactive,
             queues,
             accounts: account_rows,
+            proxies: proxy_health(&events),
         })
     }
 
@@ -432,6 +480,86 @@ impl AccountsPool {
 
 fn btree_bool(value: bool) -> u8 {
     u8::from(value)
+}
+
+fn event_counts(events: &[AccountEvent]) -> BTreeMap<String, i64> {
+    let mut counts = BTreeMap::new();
+    for event in events {
+        *counts.entry(event.outcome.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn account_health_score(
+    active: bool,
+    event_counts: &BTreeMap<String, i64>,
+    error_msg: Option<&str>,
+) -> (i64, Vec<String>) {
+    let mut score = if active { 100 } else { 50 };
+    let mut reasons = Vec::new();
+    for (outcome, count) in event_counts {
+        match outcome.as_str() {
+            "success" => {}
+            "rate_limited" => {
+                score -= 30 * count;
+                reasons.push(format!("rate limit events: {count}"));
+            }
+            "auth_denied" | "auth_failed" => {
+                score -= 60 * count;
+                reasons.push(format!("auth failures: {count}"));
+            }
+            "proxy_failed" => {
+                score -= 25 * count;
+                reasons.push(format!("proxy failures: {count}"));
+            }
+            "request_failed" => {
+                score -= 15 * count;
+                reasons.push(format!("request failures: {count}"));
+            }
+            other => {
+                score -= 10 * count;
+                reasons.push(format!("{other} events: {count}"));
+            }
+        }
+    }
+    if let Some(error_msg) = error_msg
+        && !error_msg.is_empty()
+    {
+        score -= 20;
+        reasons.push(format!("account error: {}", error_msg.chars().take(80).collect::<String>()));
+    }
+    (score.clamp(0, 100), reasons)
+}
+
+fn proxy_health(events: &[AccountEvent]) -> Vec<ProxyHealth> {
+    let mut by_proxy = BTreeMap::<String, Vec<AccountEvent>>::new();
+    for event in events {
+        let Some(proxy) = event.proxy.as_ref().filter(|proxy| !proxy.is_empty()) else {
+            continue;
+        };
+        by_proxy.entry(proxy.clone()).or_default().push(event.clone());
+    }
+
+    let mut rows = by_proxy
+        .into_iter()
+        .map(|(proxy, events)| {
+            let successes = events.iter().filter(|event| event.outcome == "success").count() as i64;
+            let failures = events.len() as i64 - successes;
+            let event_counts = event_counts(&events);
+            let score = (100 - failures * 25).clamp(0, 100);
+            let reasons =
+                if failures > 0 { vec![format!("proxy failures: {failures}")] } else { Vec::new() };
+            ProxyHealth { proxy, score, successes, failures, event_counts, reasons }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.successes.cmp(&left.successes))
+            .then_with(|| left.proxy.cmp(&right.proxy))
+    });
+    rows
 }
 
 fn guess_delimiter(line_format: &str) -> Result<char> {

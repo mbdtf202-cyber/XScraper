@@ -1,12 +1,17 @@
 pub mod account;
 pub mod analysis;
 pub mod api;
+pub mod browser_probe;
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
 pub mod drift;
 pub mod error;
+pub mod evidence;
+pub mod fetch_profile;
 pub mod gql;
 pub mod imap;
+pub mod jobs;
 pub mod lists;
 pub mod login;
 pub mod models;

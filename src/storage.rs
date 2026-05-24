@@ -13,6 +13,42 @@ pub struct AccountStore {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountEvent {
+    pub username: String,
+    pub queue: String,
+    pub operation: Option<String>,
+    pub outcome: String,
+    pub status: Option<i64>,
+    #[serde(rename = "xErrorCode")]
+    pub x_error_code: Option<i64>,
+    pub proxy: Option<String>,
+    #[serde(rename = "rateRemaining")]
+    pub rate_remaining: Option<i64>,
+    #[serde(rename = "rateReset")]
+    pub rate_reset: Option<i64>,
+    pub message: Option<String>,
+    #[serde(rename = "occurredAt")]
+    pub occurred_at: DateTime<Utc>,
+    #[serde(rename = "evidenceRef")]
+    pub evidence_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AccountEventInput {
+    pub username: String,
+    pub queue: String,
+    pub operation: Option<String>,
+    pub outcome: String,
+    pub status: Option<i64>,
+    pub x_error_code: Option<i64>,
+    pub proxy: Option<String>,
+    pub rate_remaining: Option<i64>,
+    pub rate_reset: Option<i64>,
+    pub message: Option<String>,
+    pub evidence_ref: Option<String>,
+}
+
 impl AccountStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -203,6 +239,43 @@ impl AccountStore {
         self.save(&account)
     }
 
+    pub fn record_account_event(&self, event: AccountEventInput) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO account_events (
+                username, queue, operation, outcome, status, x_error_code, proxy,
+                rate_remaining, rate_reset, message, occurred_at, evidence_ref
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                event.username,
+                event.queue,
+                event.operation,
+                event.outcome,
+                event.status,
+                event.x_error_code,
+                event.proxy,
+                event.rate_remaining,
+                event.rate_reset,
+                event.message,
+                now_utc().to_rfc3339(),
+                event.evidence_ref,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn account_events(&self) -> Result<Vec<AccountEvent>> {
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT username, queue, operation, outcome, status, x_error_code, proxy,
+                    rate_remaining, rate_reset, message, occurred_at, evidence_ref
+             FROM account_events
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], row_to_account_event)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn lock_until(
         &self,
         username: &str,
@@ -279,7 +352,27 @@ fn migrate(conn: &Connection) -> Result<()> {
             error_msg TEXT DEFAULT NULL,
             last_used TEXT DEFAULT NULL,
             mfa_code TEXT DEFAULT NULL
+        );
+        CREATE TABLE IF NOT EXISTS account_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL COLLATE NOCASE,
+            queue TEXT NOT NULL,
+            operation TEXT DEFAULT NULL,
+            outcome TEXT NOT NULL,
+            status INTEGER DEFAULT NULL,
+            x_error_code INTEGER DEFAULT NULL,
+            proxy TEXT DEFAULT NULL,
+            rate_remaining INTEGER DEFAULT NULL,
+            rate_reset INTEGER DEFAULT NULL,
+            message TEXT DEFAULT NULL,
+            occurred_at TEXT NOT NULL,
+            evidence_ref TEXT DEFAULT NULL
         );",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_account_events_username ON account_events(username);
+         CREATE INDEX IF NOT EXISTS idx_account_events_queue ON account_events(queue);
+         CREATE INDEX IF NOT EXISTS idx_account_events_proxy ON account_events(proxy);",
     )?;
     Ok(())
 }
@@ -313,6 +406,34 @@ fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
         proxy: row.get("proxy")?,
         error_msg: row.get("error_msg")?,
         last_used,
+    })
+}
+
+fn row_to_account_event(row: &Row<'_>) -> rusqlite::Result<AccountEvent> {
+    let occurred_at_raw: String = row.get("occurred_at")?;
+    let occurred_at = DateTime::parse_from_rfc3339(&occurred_at_raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+
+    Ok(AccountEvent {
+        username: row.get("username")?,
+        queue: row.get("queue")?,
+        operation: row.get("operation")?,
+        outcome: row.get("outcome")?,
+        status: row.get("status")?,
+        x_error_code: row.get("x_error_code")?,
+        proxy: row.get("proxy")?,
+        rate_remaining: row.get("rate_remaining")?,
+        rate_reset: row.get("rate_reset")?,
+        message: row.get("message")?,
+        occurred_at,
+        evidence_ref: row.get("evidence_ref")?,
     })
 }
 

@@ -1,9 +1,11 @@
 use crate::account::Account;
 use crate::error::{Result, XScraperError};
+use crate::fetch_profile::FetchProfile;
 use crate::pool::AccountsPool;
+use crate::storage::AccountEventInput;
 use crate::xclid::XClientTransactionIdGenerator;
 use chrono::Utc;
-use reqwest::{Client, Method, Proxy, StatusCode};
+use reqwest::{Client, Method, StatusCode};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -15,6 +17,7 @@ pub struct QueueClient {
     queue: String,
     proxy: Option<String>,
     base_url: String,
+    timeout: std::time::Duration,
     xclid: Arc<Mutex<BTreeMap<String, XClientTransactionIdGenerator>>>,
 }
 
@@ -22,6 +25,7 @@ pub struct QueueClient {
 struct RequestContext {
     account: Account,
     client: Client,
+    proxy: Option<String>,
     req_count: i64,
 }
 
@@ -40,6 +44,7 @@ impl QueueClient {
             queue: queue.into(),
             proxy: None,
             base_url: "https://x.com".into(),
+            timeout: std::time::Duration::from_secs(30),
             xclid: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -51,6 +56,11 @@ impl QueueClient {
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -89,19 +99,23 @@ impl QueueClient {
             return Ok(None);
         };
 
-        let mut builder = Client::builder()
-            .default_headers(account.http_headers()?)
-            .redirect(reqwest::redirect::Policy::limited(10));
         let proxy = self
             .proxy
             .clone()
             .or_else(|| std::env::var("XSCRAPER_PROXY").ok())
             .or_else(|| account.proxy.clone());
-        if let Some(proxy) = proxy {
-            builder = builder.proxy(Proxy::all(proxy)?);
+        let mut profile = FetchProfile::new().with_timeout(self.timeout).with_proxy(proxy.clone());
+        let headers = account.http_headers()?;
+        for (name, value) in &headers {
+            profile = profile.with_header(name.as_str(), value.to_str().unwrap_or_default());
         }
 
-        Ok(Some(RequestContext { account, client: builder.build()?, req_count: 0 }))
+        Ok(Some(RequestContext {
+            account,
+            client: profile.client_for_base_url(&self.base_url)?,
+            proxy,
+            req_count: 0,
+        }))
     }
 
     async fn request_with_context(
@@ -119,27 +133,57 @@ impl QueueClient {
             QueueRequest::Get { params, .. } => builder.query(params),
             QueueRequest::PostJson { body, .. } => builder.json(body),
         };
-        let response = builder
-            .header("x-client-transaction-id", transaction_id)
-            .send()
-            .await
-            .map_err(|error| RequestDecision::Abort(error.to_string()))?;
+        let response = match builder.header("x-client-transaction-id", transaction_id).send().await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let outcome = if ctx.proxy.is_some() { "proxy_failed" } else { "request_failed" };
+                let _ = self.record_event(ctx, outcome, None, None, None, Some(error.to_string()));
+                return Err(RequestDecision::Abort(error.to_string()));
+            }
+        };
 
         let status = response.status();
         let headers = response.headers().clone();
         let value = match response.json::<Value>().await {
             Ok(value) => value,
             Err(error) if status.is_success() => {
-                return Err(RequestDecision::Abort(format!(
-                    "invalid JSON response for successful request: {error}"
-                )));
+                let message = format!("invalid JSON response for successful request: {error}");
+                let _ = self.record_event(
+                    ctx,
+                    "request_failed",
+                    Some(status),
+                    None,
+                    None,
+                    Some(message.clone()),
+                );
+                return Err(RequestDecision::Abort(message));
             }
             Err(_) => Value::Object(Default::default()),
         };
 
-        check_response(&ctx.account.username, status, &headers, &value)?;
+        let inspection = inspect_response(status, &headers, &value);
+        if let Err(decision) = check_response(&ctx.account.username, status, &headers, &value) {
+            let _ = self.record_event(
+                ctx,
+                inspection.outcome,
+                Some(status),
+                inspection.x_error_code,
+                Some((inspection.rate_remaining, inspection.rate_reset)),
+                Some(inspection.message),
+            );
+            return Err(decision);
+        }
 
         ctx.req_count += 1;
+        let _ = self.record_event(
+            ctx,
+            "success",
+            Some(status),
+            inspection.x_error_code,
+            Some((inspection.rate_remaining, inspection.rate_reset)),
+            None,
+        );
         Ok(QueueResponse { account_username: ctx.account.username.clone(), status, headers, value })
     }
 
@@ -185,6 +229,30 @@ impl QueueClient {
         let base = Url::parse(&self.base_url)
             .map_err(|error| RequestDecision::Abort(error.to_string()))?;
         base.join(url).map_err(|error| RequestDecision::Abort(error.to_string()))
+    }
+
+    fn record_event(
+        &self,
+        ctx: &RequestContext,
+        outcome: &str,
+        status: Option<StatusCode>,
+        x_error_code: Option<i64>,
+        rate: Option<(i64, i64)>,
+        message: Option<String>,
+    ) -> Result<()> {
+        self.pool.record_account_event(AccountEventInput {
+            username: ctx.account.username.clone(),
+            queue: self.queue.clone(),
+            operation: Some(self.queue.clone()),
+            outcome: outcome.to_string(),
+            status: status.map(|status| i64::from(status.as_u16())),
+            x_error_code,
+            proxy: ctx.proxy.clone(),
+            rate_remaining: rate.map(|(remaining, _)| remaining).filter(|value| *value >= 0),
+            rate_reset: rate.map(|(_, reset)| reset).filter(|value| *value >= 0),
+            message,
+            evidence_ref: None,
+        })
     }
 }
 
@@ -285,6 +353,15 @@ enum RequestDecision {
     Abort(String),
 }
 
+#[derive(Debug, Clone)]
+struct ResponseInspection {
+    outcome: &'static str,
+    rate_remaining: i64,
+    rate_reset: i64,
+    x_error_code: Option<i64>,
+    message: String,
+}
+
 fn check_response(
     username: &str,
     status: StatusCode,
@@ -342,6 +419,45 @@ fn check_response(
     Ok(())
 }
 
+fn inspect_response(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    value: &Value,
+) -> ResponseInspection {
+    let rate_remaining = headers
+        .get("x-rate-limit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(-1);
+    let rate_reset = headers
+        .get("x-rate-limit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(-1);
+    let x_error_code = first_error_code(value);
+    let message = error_message(value).unwrap_or_else(|| "OK".into());
+    let outcome = if rate_remaining == 0
+        || x_error_code == Some(88)
+        || message.starts_with("(88) Rate limit exceeded")
+        || status == StatusCode::TOO_MANY_REQUESTS
+    {
+        "rate_limited"
+    } else if x_error_code == Some(326)
+        || x_error_code == Some(32)
+        || message.starts_with("(326) Authorization: Denied by access control")
+        || message.starts_with("(32) Could not authenticate you")
+        || (message == "OK" && status == StatusCode::FORBIDDEN)
+    {
+        if x_error_code == Some(32) { "auth_failed" } else { "auth_denied" }
+    } else if !status.is_success() {
+        "request_failed"
+    } else {
+        "success"
+    };
+
+    ResponseInspection { outcome, rate_remaining, rate_reset, x_error_code, message }
+}
+
 fn error_message(value: &Value) -> Option<String> {
     let errors = value.get("errors")?.as_array()?;
     let mut messages = Vec::new();
@@ -351,6 +467,10 @@ fn error_message(value: &Value) -> Option<String> {
         messages.push(format!("({code}) {message}"));
     }
     (!messages.is_empty()).then(|| messages.join("; "))
+}
+
+fn first_error_code(value: &Value) -> Option<i64> {
+    value.get("errors")?.as_array()?.iter().find_map(|error| error.get("code")?.as_i64())
 }
 
 fn pseudo_transaction_id(method: &str, path: &str) -> String {

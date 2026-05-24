@@ -268,6 +268,9 @@ pub enum DoctorCommand {
     Imap(DoctorImapArgs),
     Xclid(DoctorXclidArgs),
     Drift(DoctorDriftArgs),
+    #[command(alias = "browser_drift")]
+    BrowserDrift(DoctorBrowserDriftArgs),
+    Report(DoctorReportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -279,12 +282,52 @@ pub struct DoctorImapArgs {
 pub struct DoctorXclidArgs {
     #[arg(long)]
     pub offline: bool,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct DoctorDriftArgs {
     #[arg(long)]
     pub live: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorBrowserDriftArgs {
+    #[arg(long)]
+    pub events: Option<PathBuf>,
+    #[arg(long)]
+    pub live: bool,
+    #[arg(long)]
+    pub cdp_url: Option<String>,
+    #[arg(long)]
+    pub chrome_path: Option<String>,
+    #[arg(long)]
+    pub user_data_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub account: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    pub timeout_seconds: u64,
+    #[arg(long, default_value = "search")]
+    pub operation: String,
+    #[arg(long, default_value = "rust")]
+    pub target: String,
+    #[arg(long, value_parser = parse_json_arg)]
+    pub kv: Option<Value>,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorReportArgs {
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long)]
+    pub browser_events: Option<PathBuf>,
+    #[arg(long, default_value = "search")]
+    pub operation: String,
+    #[arg(long, default_value = "rust")]
+    pub target: String,
+    #[arg(long, value_parser = parse_json_arg)]
+    pub kv: Option<Value>,
 }
 
 #[derive(Debug, Args)]
@@ -533,7 +576,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     .await?,
             )?
         }
-        Command::Doctor(args) => run_doctor(args).await?,
+        Command::Doctor(args) => run_doctor(args, pool.clone()).await?,
         Command::ParseFixture(args) => {
             let raw = std::fs::read_to_string(&args.file)
                 .map_err(|source| crate::error::XScraperError::io(args.file.clone(), source))?;
@@ -554,7 +597,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-async fn run_doctor(args: DoctorArgs) -> Result<()> {
+async fn run_doctor(args: DoctorArgs, pool: AccountsPool) -> Result<()> {
     match args.command {
         DoctorCommand::Security => doctor_security()?,
         DoctorCommand::Imap(args) => {
@@ -563,6 +606,8 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
         }
         DoctorCommand::Xclid(args) => doctor_xclid(args).await?,
         DoctorCommand::Drift(args) => doctor_drift(args).await?,
+        DoctorCommand::BrowserDrift(args) => doctor_browser_drift(args, pool.clone()).await?,
+        DoctorCommand::Report(args) => doctor_report(args, pool)?,
     }
     Ok(())
 }
@@ -670,6 +715,18 @@ fn is_sensitive_tracked_path(path: &str) -> bool {
 }
 
 async fn doctor_xclid(args: DoctorXclidArgs) -> Result<()> {
+    if args.json {
+        if args.offline {
+            print_json(&crate::diagnostics::offline_xclid_report())?;
+            return Ok(());
+        }
+        let client =
+            reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(10)).build()?;
+        let html = client.get("https://x.com").send().await?.error_for_status()?.text().await?;
+        print_json(&crate::xclid::diagnose_from_html(&html))?;
+        return Ok(());
+    }
+
     let id = if args.offline {
         crate::xclid::XClientTransactionIdGenerator::from_parts(vec![1, 2, 3, 4, 5, 6], "abcdef")
             .calc("GET", "/i/api/graphql/test")
@@ -681,6 +738,105 @@ async fn doctor_xclid(args: DoctorXclidArgs) -> Result<()> {
             .calc("GET", "/i/api/graphql/test")
     };
     println!("xclid: ok len={} sample={}", id.len(), id);
+    Ok(())
+}
+
+async fn doctor_browser_drift(args: DoctorBrowserDriftArgs, pool: AccountsPool) -> Result<()> {
+    let report = if let Some(events) = args.events {
+        crate::diagnostics::browser_drift_report_from_events_file(
+            &events,
+            &args.operation,
+            &args.target,
+            args.kv,
+        )?
+    } else if args.live {
+        let mut config = crate::browser_probe::BrowserProbeConfig::new(browser_probe_url(
+            &args.operation,
+            &args.target,
+        ));
+        if let Some(account_name) = args.account.as_deref() {
+            let account = pool.get(account_name)?;
+            config.cookies = account
+                .cookies
+                .iter()
+                .map(|(name, value)| crate::browser_probe::BrowserCookie::x_com(name, value))
+                .collect();
+        }
+        config.cdp_url = args.cdp_url;
+        config.chrome_path = args.chrome_path;
+        config.user_data_dir = args.user_data_dir;
+        config.timeout = std::time::Duration::from_secs(args.timeout_seconds);
+        let events = crate::browser_probe::capture_graphql_xhr_events(config).await?;
+        let observed = crate::browser_probe::parse_graphql_xhr_events(&events)?;
+        let local = crate::operations::operation_request(&args.operation, &args.target, args.kv)
+            .ok_or_else(|| {
+                crate::error::XScraperError::Config(format!(
+                    "unknown operation: {}",
+                    args.operation
+                ))
+            })?;
+        crate::browser_probe::build_browser_drift_report(vec![local], observed)
+    } else {
+        return Err(crate::error::XScraperError::Config(
+            "doctor browser-drift requires --events <file> or --live".into(),
+        ));
+    };
+    if report.ok {
+        print_json(&report)?;
+        Ok(())
+    } else {
+        Err(crate::error::XScraperError::Config(format!(
+            "browser drift detected: {}",
+            serde_json::to_string(&report)?
+        )))
+    }
+}
+
+fn browser_probe_url(operation: &str, target: &str) -> String {
+    match operation.replace('-', "_").as_str() {
+        "search" | "search_trend" => {
+            format!("https://x.com/search?q={}&src=typed_query&f=live", urlencoding::encode(target))
+        }
+        "search_user" => {
+            format!("https://x.com/search?q={}&src=typed_query&f=user", urlencoding::encode(target))
+        }
+        _ => "https://x.com/home".into(),
+    }
+}
+
+fn doctor_report(args: DoctorReportArgs, pool: AccountsPool) -> Result<()> {
+    let browser_drift = if let Some(path) = args.browser_events {
+        Some(crate::diagnostics::browser_drift_report_from_events_file(
+            &path,
+            &args.operation,
+            &args.target,
+            args.kv,
+        )?)
+    } else {
+        None
+    };
+    let report = crate::diagnostics::build_report(
+        pool.health_report()?,
+        crate::diagnostics::offline_xclid_report(),
+        browser_drift,
+    );
+    if args.json {
+        print_json(&report)?;
+    } else {
+        println!("diagnostics: ok={}", report.ok);
+        println!(
+            "accounts: total={} active={} inactive={}",
+            report.account_pool.total, report.account_pool.active, report.account_pool.inactive
+        );
+        println!(
+            "xclid: ok={} failure_stage={}",
+            report.xclid.ok,
+            report.xclid.failure_stage.as_deref().unwrap_or("-")
+        );
+        if let Some(browser_drift) = report.browser_drift {
+            println!("browser_drift: ok={}", browser_drift.ok);
+        }
+    }
     Ok(())
 }
 

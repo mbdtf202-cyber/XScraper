@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -65,6 +66,34 @@ def write_report(report: dict[str, Any]) -> Path:
     return out_path
 
 
+def evidence_dir() -> Path:
+    out_dir = output_dir() / "evidence"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def redact_text(raw: str) -> str:
+    raw = re.sub(r"auth_token=[^;\s]+", "auth_token=<redacted>", raw, flags=re.I)
+    raw = re.sub(r"ct0=[^;\s]+", "ct0=<redacted>", raw, flags=re.I)
+    raw = re.sub(r"authorization:\s*[^\n]+", "authorization: <redacted>", raw, flags=re.I)
+    raw = re.sub(r"//[^/\s:@]+:[^@\s/]+@", "//<redacted>@", raw)
+    return raw
+
+
+def write_evidence(report: dict[str, Any], name: str, result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    body = {
+        "name": name,
+        "returncode": result.returncode,
+        "stdout": redact_text(result.stdout),
+        "stderr": redact_text(result.stderr),
+    }
+    path = evidence_dir() / f"{len(report.get('evidence', [])) + 1:02d}-{name}.json"
+    path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+    ref = {"name": name, "path": str(path.relative_to(ROOT))}
+    report.setdefault("evidence", []).append(ref)
+    return ref
+
+
 def redact_command(cmd: list[str]) -> str:
     if "add-cookie" not in cmd:
         return " ".join(cmd)
@@ -94,6 +123,8 @@ def run_stage(
         stage["stdoutPreview"] = result.stdout[:500]
     if result.stderr.strip():
         stage["stderrPreview"] = result.stderr[:500]
+    if result.returncode != 0 or result.stderr.strip():
+        stage["evidence"] = write_evidence(report, name, result)
 
     if result.returncode == 0 and parser is not None:
         try:
@@ -102,6 +133,7 @@ def run_stage(
         except Exception as exc:  # noqa: BLE001 - report parser failures as harness failures.
             stage["ok"] = False
             stage["parseError"] = str(exc)
+            stage["evidence"] = write_evidence(report, f"{name}-parse-error", result)
 
     report["stages"].append(stage)
     return bool(stage["ok"]), result, parsed
@@ -148,6 +180,7 @@ def main() -> int:
         "query": query,
         "ok": False,
         "stages": [],
+        "evidence": [],
         "health": {},
     }
 
